@@ -1,12 +1,12 @@
-name: AirTagSync Anisette
+name: PresenceSync Anisette
 version: "1.0.0"
 slug: anisette
-description: Anisette server — provides Apple-compatible auth headers for the AirTagSync integration. Required because Apple's gateway expects per-request signed headers that normally only Apple devices generate.
+description: Anisette server — provides Apple-compatible auth headers for the PresenceSync add-on. Required because Apple's gateway expects per-request signed headers that normally only Apple devices generate. You don't interact with this add-on directly.
 arch:
   - amd64
   - aarch64
   - armv7
-url: https://github.com/PrayerfulDrop/airtagsync-addon
+url: https://github.com/PrayerfulDrop/presencesync-addon
 init: false
 hassio_api: false
 homeassistant_api: false
@@ -14,7 +14,7 @@ host_network: false
 ports:
   6969/tcp: 6969
 ports_description:
-  6969/tcp: Anisette HTTP port — the AirTagSync integration connects here
+  6969/tcp: Anisette HTTP port — the PresenceSync add-on connects here
 boot: auto
 startup: services
 options: {}
