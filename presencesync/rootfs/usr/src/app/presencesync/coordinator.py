@@ -49,6 +49,22 @@ class Coordinator:
             except Exception:
                 log.exception("Failed to auto-reload bundle from %s", state.BUNDLE_DIR)
 
+        # Auto-resume the pyicloud session from saved cookies. If cookies in
+        # /data/pyicloud-cookies/ are still valid, PyiCloudService instantiation
+        # returns a logged_in instance without prompting for 2FA. If cookies
+        # have expired Apple-side, we get a needs_2fa state and the UI will
+        # surface it. Either way, no manual Log-in click needed across restarts.
+        s = state.get()
+        if s.tracking.include_devices and s.apple.username and s.apple.password:
+            log.info("icloud: attempting auto-resume from saved cookies")
+            try:
+                ic_state = await asyncio.get_event_loop().run_in_executor(
+                    None, self.icloud.login, s.apple.username, s.apple.password
+                )
+                log.info("icloud auto-resume: %s", ic_state)
+            except Exception:
+                log.exception("icloud auto-resume failed (will need fresh login)")
+
         self._task = asyncio.create_task(self._run())
 
     async def _run(self):
