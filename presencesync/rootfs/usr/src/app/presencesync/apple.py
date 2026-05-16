@@ -149,26 +149,44 @@ class AppleClient:
 
         # findmy.py processes RollingKeyPairSource accessories SERIALLY when given a
         # list, and each one iterates ~7 days × 96 slots looking backwards for
-        # reports. With 13 accessories that's ~10 minutes per poll. Parallelize
-        # at our level — each fetch_location(single accessory) returns either
-        # LocationReport or None.
-        sem = asyncio.Semaphore(8)  # cap concurrent gateway requests
+        # reports. Per-accessory time can be a minute or more for the very first
+        # fetch. Parallelize at our level and bound each accessory's time so a
+        # single slow one doesn't block the whole tick.
+        sem = asyncio.Semaphore(8)
+        per_accessory_timeout = 90  # seconds
 
         async def _one(acc):
             async with sem:
+                acc_name = getattr(acc, "name", None) or (
+                    acc.to_json().get("name") if hasattr(acc, "to_json") else None
+                ) or "?"
+                t_start = time.time()
                 try:
-                    report = await self.account.fetch_location(acc)
-                except Exception as err:
-                    log.warning("fetch_location for %s failed: %s",
-                                getattr(acc, "name", "?"), err)
+                    report = await asyncio.wait_for(
+                        self.account.fetch_location(acc),
+                        timeout=per_accessory_timeout,
+                    )
+                    log.info("  fetch %s done in %.1fs → %s",
+                             acc_name, time.time() - t_start,
+                             "report" if report is not None else "no report")
+                    return acc, report
+                except asyncio.TimeoutError:
+                    log.warning("  fetch %s TIMED OUT after %ds — skipping this cycle",
+                                acc_name, per_accessory_timeout)
                     return acc, None
-                return acc, report
+                except Exception as err:
+                    log.warning("  fetch %s FAILED: %s: %s",
+                                acc_name, type(err).__name__, err)
+                    return acc, None
 
         t0 = time.time()
+        log.info("starting parallel fetch of %d accessories (sem=8, timeout=%ds each)",
+                 len(self.accessories), per_accessory_timeout)
         tasks = [_one(a) for a in self.accessories]
         results = await asyncio.gather(*tasks)
+        with_report = sum(1 for _, r in results if r is not None)
         log.info("fetch_locations: %d/%d accessories returned a report in %.1fs",
-                 sum(1 for _, r in results if r is not None), len(results), time.time() - t0)
+                 with_report, len(results), time.time() - t0)
         self._persist()  # may include refreshed tokens
 
         out: list[LocationFix] = []
