@@ -48,8 +48,16 @@ class AppleClient:
         if not anisette_url:
             raise RuntimeError("anisette_url is not configured")
         self.anisette = RemoteAnisetteProvider(anisette_url)
-        # Try to resume from persisted state
+        # Try to resume from persisted state. We only attempt this if the saved
+        # blob looks like an AccountStateMapping — older versions wrote a partial
+        # shape that AsyncAppleAccount rejects with KeyError 'ids' and the close
+        # path also tries to use _closed which isn't set yet. Validate first.
         saved = state.load_apple_state()
+        is_valid_saved = isinstance(saved, dict) and "ids" in saved and "account" in saved
+        if saved and not is_valid_saved:
+            log.warning("Saved Apple state is malformed; clearing")
+            state.clear_apple_state()
+            saved = None
         if saved:
             try:
                 self.account = AsyncAppleAccount(anisette=self.anisette, state_info=saved)
@@ -59,7 +67,9 @@ class AppleClient:
             except Exception:
                 log.exception("Failed to resume saved Apple state; will require login again")
                 state.clear_apple_state()
-        self.account = AsyncAppleAccount(anisette=self.anisette)
+                self.account = None
+        if self.account is None:
+            self.account = AsyncAppleAccount(anisette=self.anisette)
 
     async def login(self, username: str, password: str) -> LoginState:
         await self.ensure_account()
@@ -105,6 +115,16 @@ class AppleClient:
         self.beaconstore_key = bs_path.read_bytes()
         if len(self.beaconstore_key) != 32:
             raise ValueError(f"BeaconStore.key is {len(self.beaconstore_key)}B, expected 32")
+
+        # macOS tar pollutes bundles with AppleDouble `._*` sidecars holding
+        # extended attributes. findmy.plist.list_accessories doesn't filter
+        # them and chokes when it tries to parse one as a plist. Strip them
+        # before letting findmy walk the tree.
+        sidecars = [p for p in bundle_dir.rglob("._*") if p.is_file()]
+        for p in sidecars:
+            p.unlink(missing_ok=True)
+        if sidecars:
+            log.info("Removed %d AppleDouble sidecar(s) before findmy.list_accessories", len(sidecars))
 
         # findmy expects the bundle to look like ~/Library/com.apple.icloud.searchpartyd/
         # i.e. OwnedBeacons/, BeaconNamingRecord/, KeyAlignmentRecords/ at the root.
