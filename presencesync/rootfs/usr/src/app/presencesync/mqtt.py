@@ -72,7 +72,8 @@ class MqttPublisher:
         is_failure = getattr(reason_code, "is_failure", None)
         rc_int = getattr(reason_code, "value", reason_code)
         if (is_failure is False) or rc_int == 0:
-            log.info("MQTT connected to %s:%s", self._cfg.host, self._cfg.port)
+            cfg = state.get().mqtt
+            log.info("MQTT connected to %s:%s", cfg.host, cfg.port)
             info = client.publish(self._availability_topic, "online", qos=1, retain=True)
             log.info("publish %s='online' → rc=%s mid=%s",
                      self._availability_topic, info.rc, info.mid)
