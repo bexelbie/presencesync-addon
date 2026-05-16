@@ -65,6 +65,20 @@ async def index(request: Request):
     })
 
 
+@app.get("/api/ingress-debug")
+async def ingress_debug(request: Request):
+    """Echo selected headers + URL parts so we can debug Ingress path issues."""
+    return {
+        "url_path": request.url.path,
+        "headers": {
+            "x_ingress_path": request.headers.get("X-Ingress-Path"),
+            "host": request.headers.get("Host"),
+            "x_forwarded_proto": request.headers.get("X-Forwarded-Proto"),
+            "x_forwarded_host": request.headers.get("X-Forwarded-Host"),
+        },
+    }
+
+
 @app.get("/api/status")
 async def status():
     coord = get_coord()

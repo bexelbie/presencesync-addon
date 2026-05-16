@@ -6,10 +6,12 @@ async function api(path, opts = {}) {
     o.body = opts.body instanceof FormData ? opts.body : JSON.stringify(opts.body);
     if (!(opts.body instanceof FormData)) o.headers["Content-Type"] = "application/json";
   }
-  // <base href="..."> in index.html sets the document base, so a leading-slash
-  // path here would still escape it. Strip it so the fetch resolves to
-  // <base>/api/... and the request actually reaches the addon under HA Ingress.
-  const r = await fetch(path.replace(/^\//, ""), o);
+  // Force absolute URL using the current page's pathname as the base. This
+  // makes the request work under HA Ingress whether or not <base href> was
+  // honoured and whether or not the page URL ended with a trailing slash.
+  const pageBase = window.location.pathname.replace(/\/?$/, "/");
+  const url = pageBase + path.replace(/^\//, "");
+  const r = await fetch(url, o);
   const t = await r.text();
   let data;
   try { data = JSON.parse(t); } catch { data = t; }
