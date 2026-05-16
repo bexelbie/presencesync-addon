@@ -13,7 +13,8 @@ log = logging.getLogger(__name__)
 
 DATA_DIR = Path(os.environ.get("PRESENCESYNC_DATA_DIR", "/data"))
 CONFIG_PATH = DATA_DIR / "presencesync.json"
-APPLE_STATE_PATH = DATA_DIR / "apple_state.json"
+APPLE_STATE_PATH = DATA_DIR / "apple_state.pickle"
+APPLE_STATE_PATH_LEGACY = DATA_DIR / "apple_state.json"  # historical JSON file
 BUNDLE_DIR = DATA_DIR / "bundle"  # extracted bundle contents
 
 
@@ -94,21 +95,43 @@ async def update(mutator) -> Settings:
     return _settings
 
 
-# --- Apple auth state (separate file because it's binary-ish) -----------
+# --- Apple auth state ---------------------------------------------------
+# AsyncAppleAccount.__getstate__() returns a nested dict with bytes, datetimes,
+# and (for some anisette providers) closure-bound callables. JSON with
+# `default=str` silently converts those to strings on save — and on restore
+# they're no longer reconstructable, so the saved state always fails to load
+# and we end up re-prompting for 2FA every restart. Use pickle, which
+# roundtrips everything cleanly.
 
-def save_apple_state(state: dict) -> None:
+def save_apple_state(state: object) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    APPLE_STATE_PATH.write_text(json.dumps(state, default=str))
+    import pickle
+    tmp = APPLE_STATE_PATH.with_suffix(".tmp")
+    tmp.write_bytes(pickle.dumps(state))
+    tmp.replace(APPLE_STATE_PATH)
+    # remove any stale JSON copy from older versions
+    APPLE_STATE_PATH_LEGACY.unlink(missing_ok=True)
 
 
-def load_apple_state() -> dict | None:
-    if not APPLE_STATE_PATH.exists():
-        return None
-    try:
-        return json.loads(APPLE_STATE_PATH.read_text())
-    except json.JSONDecodeError:
-        return None
+def load_apple_state():
+    import pickle
+    if APPLE_STATE_PATH.exists():
+        try:
+            return pickle.loads(APPLE_STATE_PATH.read_bytes())
+        except Exception as err:
+            log.warning("apple_state.pickle exists but won't load (%s); clearing", err)
+            APPLE_STATE_PATH.unlink(missing_ok=True)
+    # Fallback to old JSON file (one-time migration: probably broken but try)
+    if APPLE_STATE_PATH_LEGACY.exists():
+        try:
+            data = json.loads(APPLE_STATE_PATH_LEGACY.read_text())
+            APPLE_STATE_PATH_LEGACY.unlink(missing_ok=True)
+            return data
+        except Exception:
+            APPLE_STATE_PATH_LEGACY.unlink(missing_ok=True)
+    return None
 
 
 def clear_apple_state() -> None:
     APPLE_STATE_PATH.unlink(missing_ok=True)
+    APPLE_STATE_PATH_LEGACY.unlink(missing_ok=True)
