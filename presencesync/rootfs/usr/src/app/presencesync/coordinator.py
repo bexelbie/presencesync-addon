@@ -63,8 +63,14 @@ class Coordinator:
 
     async def _tick(self):
         s = state.get()
-        if not s.bundle_uploaded or self.apple.last_login_state != LoginState.LOGGED_IN:
+        if not s.bundle_uploaded:
+            log.info("tick skipped: bundle not uploaded yet")
             return
+        if self.apple.last_login_state != LoginState.LOGGED_IN:
+            log.info("tick skipped: not logged in (state=%s) — sign in via the web UI",
+                     self.apple.last_login_state)
+            return
+        log.info("tick: starting fetch_locations for %d accessories", len(self.apple.accessories))
         fixes = await self.apple.fetch_locations()
         self.last_run_unix = int(time.time())
         self.last_fixes = fixes
