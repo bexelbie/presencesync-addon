@@ -1,2 +1,2 @@
 """PresenceSync — Apple Find My → Home Assistant bridge."""
-__version__ = "0.1.3"
+__version__ = "0.1.4"

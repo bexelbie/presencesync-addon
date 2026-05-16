@@ -38,18 +38,38 @@ def load_bundle(bundle_dir: Path) -> tuple[bytes, list[OwnedBeacon]]:
     """Read BeaconStore.key + every record under OwnedBeacons/ in the bundle."""
     bs_path = bundle_dir / "BeaconStore.key"
     if not bs_path.exists():
-        raise FileNotFoundError(f"missing {bs_path}")
+        raise FileNotFoundError(
+            f"BeaconStore.key missing in bundle. "
+            f"Bundle dir contents: {[p.name for p in bundle_dir.iterdir()]}"
+        )
     key = bs_path.read_bytes()
     if len(key) != 32:
         raise ValueError(f"BeaconStore.key is {len(key)} bytes, expected 32")
 
     beacons_dir = bundle_dir / "OwnedBeacons"
     if not beacons_dir.is_dir():
-        raise FileNotFoundError(f"missing {beacons_dir}")
+        raise FileNotFoundError(
+            f"OwnedBeacons/ directory missing. "
+            f"Bundle dir contents: {[p.name for p in bundle_dir.iterdir()]}"
+        )
+
+    records = sorted(beacons_dir.glob("*.record"))
+    if not records:
+        raise ValueError(
+            f"OwnedBeacons/ has no .record files. "
+            f"Contains: {[p.name for p in beacons_dir.iterdir()][:10]}"
+        )
 
     out: list[OwnedBeacon] = []
-    for rec in sorted(beacons_dir.glob("*.record")):
-        inner = decrypt_record(rec.read_bytes(), key)
+    for rec in records:
+        try:
+            blob = rec.read_bytes()
+            inner = decrypt_record(blob, key)
+        except Exception as err:
+            raise ValueError(
+                f"failed to decrypt {rec.name} ({len(blob) if 'blob' in dir() else '?'}B): "
+                f"{type(err).__name__}: {err}. First bytes: {blob[:24].hex() if 'blob' in dir() else 'n/a'}"
+            ) from err
         private_key = inner.get("privateKey", {}).get("key", {}).get("data") or inner.get("privateKey")
         shared_secret = inner.get("sharedSecret", {}).get("key", {}).get("data") or inner.get("sharedSecret")
         if isinstance(private_key, dict):

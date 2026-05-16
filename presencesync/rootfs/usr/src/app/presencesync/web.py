@@ -224,41 +224,60 @@ async def apple_submit_2fa(body: dict):
 @app.post("/api/bundle/upload")
 async def upload_bundle(file: UploadFile):
     if not file.filename or not file.filename.endswith((".tar", ".tar.gz", ".tgz")):
-        raise HTTPException(400, "expected a .tar.gz bundle")
+        raise HTTPException(400, f"expected a .tar.gz bundle, got filename={file.filename!r}")
 
     # Save to a temp file, extract into /data/bundle
     bundle_dir = state.BUNDLE_DIR
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
-    # Wipe previous bundle
+    # Wipe previous bundle (files only — directory shells are fine)
     for p in bundle_dir.rglob("*"):
         if p.is_file():
             p.unlink()
 
+    tmp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz") as tmp:
             tmp_path = Path(tmp.name)
+            total = 0
             while True:
                 chunk = await file.read(1024 * 1024)
                 if not chunk:
                     break
                 tmp.write(chunk)
+                total += len(chunk)
+        log.info("bundle upload: %s, %d bytes saved to %s", file.filename, total, tmp_path)
         with tarfile.open(tmp_path, "r:*") as t:
+            members = t.getmembers()
+            log.info("tarball has %d entries: %s%s",
+                     len(members),
+                     [m.name for m in members[:8]],
+                     "…" if len(members) > 8 else "")
             t.extractall(bundle_dir)  # noqa: S202
     except Exception as e:
-        raise HTTPException(400, f"failed to unpack bundle: {e}")
+        log.exception("bundle unpack failed")
+        raise HTTPException(400, f"failed to unpack bundle ({type(e).__name__}): {e}")
     finally:
-        try:
-            tmp_path.unlink()
-        except Exception:
-            pass
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+    # What ended up on disk?
+    extracted = sorted([str(p.relative_to(bundle_dir)) for p in bundle_dir.rglob("*") if p.is_file()])
+    log.info("extracted %d files. first ten: %s", len(extracted), extracted[:10])
 
     # Load beacons
     coord = get_coord()
     try:
         coord.apple.load_bundle(bundle_dir)
     except Exception as e:
-        raise HTTPException(400, f"bundle is not valid: {e}")
+        log.exception("bundle load failed")
+        raise HTTPException(400,
+            f"bundle is not valid ({type(e).__name__}): {e}. "
+            f"Extracted files: {extracted[:20]}{'…' if len(extracted)>20 else ''}"
+        )
 
     await state.update(lambda s: setattr(s, "bundle_uploaded", True))
     return {
