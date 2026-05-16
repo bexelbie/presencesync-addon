@@ -14,21 +14,83 @@ shared their location).
 The two libraries use different Apple endpoints and authenticate via
 different protocols, so we hold both sessions in parallel. Both persist
 to `/data` so the user only does 2FA once per Apple-server invalidation.
+
+Module-load monkey-patches:
+- pyicloud.session.PyiCloudSession gets an IPv4-only adapter mounted on
+  Apple's three auth hosts (idmsa.apple.com, appleid.apple.com,
+  auth.apple.com). Apple's auth servers don't speak IPv6 reliably and
+  silently fail to push 2FA codes when contacted over v6. This is the
+  fix iCloud3 v3.5 (May 2026) shipped after months of HSA2 breakage.
 """
 from __future__ import annotations
 
 import logging
 import math
+import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+
+import urllib3.util.connection
+from requests.adapters import HTTPAdapter
 
 from . import state
 
 log = logging.getLogger(__name__)
 
 COOKIE_DIR = state.DATA_DIR / "pyicloud-cookies"
+
+
+# ── IPv4-only adapter for Apple auth endpoints (iCloud3 v3.5 workaround) ─
+class _IPv4OnlyAdapter(HTTPAdapter):
+    """Force the underlying urllib3 connection pool to use AF_INET only.
+
+    Apple's auth servers (idmsa/appleid/auth.apple.com) accept IPv6 connections
+    but then silently fail to deliver the 2FA push notification flow. Forcing
+    DNS to return only IPv4 addresses for those hosts makes HSA2 work again.
+    """
+    def send(self, request, **kwargs):
+        original = urllib3.util.connection.allowed_gai_family
+        urllib3.util.connection.allowed_gai_family = lambda: socket.AF_INET
+        try:
+            return super().send(request, **kwargs)
+        finally:
+            urllib3.util.connection.allowed_gai_family = original
+
+
+def _install_ipv4_patch_on_pyicloud_session() -> None:
+    """Mount IPv4-only adapter on every PyiCloudSession instance.
+
+    Wraps PyiCloudSession.__init__ so all future sessions get the adapter
+    bound to the three auth hosts. Other Apple endpoints (fmipmobile, etc.)
+    are unaffected and remain free to use IPv4 or IPv6.
+    """
+    try:
+        from pyicloud.session import PyiCloudSession
+    except Exception:
+        log.warning("pyicloud not importable yet — IPv4 patch deferred")
+        return
+
+    if getattr(PyiCloudSession, "_presencesync_ipv4_patched", False):
+        return
+    _orig_init = PyiCloudSession.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        _orig_init(self, *args, **kwargs)
+        adapter = _IPv4OnlyAdapter()
+        for host in ("https://idmsa.apple.com",
+                     "https://appleid.apple.com",
+                     "https://auth.apple.com"):
+            self.mount(host, adapter)
+
+    PyiCloudSession.__init__ = _patched_init
+    PyiCloudSession._presencesync_ipv4_patched = True
+    log.info("pyicloud: IPv4 adapter mounted on idmsa/appleid/auth.apple.com")
+
+
+# Run at module load so it's in place before any PyiCloudService is constructed.
+_install_ipv4_patch_on_pyicloud_session()
 
 
 @dataclass
