@@ -53,7 +53,9 @@ def load_bundle(bundle_dir: Path) -> tuple[bytes, list[OwnedBeacon]]:
             f"Bundle dir contents: {[p.name for p in bundle_dir.iterdir()]}"
         )
 
-    records = sorted(beacons_dir.glob("*.record"))
+    # macOS tar pollutes bundles with AppleDouble sidecar files prefixed `._`
+    # — those aren't real records, just resource-fork metadata. Skip them.
+    records = sorted(p for p in beacons_dir.glob("*.record") if not p.name.startswith("._"))
     if not records:
         raise ValueError(
             f"OwnedBeacons/ has no .record files. "
