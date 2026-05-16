@@ -141,42 +141,46 @@ class AppleClient:
         if not self.accessories:
             return []
 
-        try:
-            reports = await self.account.fetch_location(self.accessories)
-        except Exception:
-            log.exception("fetch_location failed")
-            return []
+        # findmy.py processes RollingKeyPairSource accessories SERIALLY when given a
+        # list, and each one iterates ~7 days × 96 slots looking backwards for
+        # reports. With 13 accessories that's ~10 minutes per poll. Parallelize
+        # at our level — each fetch_location(single accessory) returns either
+        # LocationReport or None.
+        sem = asyncio.Semaphore(8)  # cap concurrent gateway requests
+
+        async def _one(acc):
+            async with sem:
+                try:
+                    report = await self.account.fetch_location(acc)
+                except Exception as err:
+                    log.warning("fetch_location for %s failed: %s",
+                                getattr(acc, "name", "?"), err)
+                    return acc, None
+                return acc, report
+
+        t0 = time.time()
+        tasks = [_one(a) for a in self.accessories]
+        results = await asyncio.gather(*tasks)
+        log.info("fetch_locations: %d/%d accessories returned a report in %.1fs",
+                 sum(1 for _, r in results if r is not None), len(results), time.time() - t0)
         self._persist()  # may include refreshed tokens
 
         out: list[LocationFix] = []
-        if isinstance(reports, dict):
-            for acc, report in reports.items():
-                if report is None:
-                    continue
-                j = acc.to_json() if hasattr(acc, "to_json") else {}
-                ident = j.get("identifier") or getattr(acc, "name", "unknown")
-                name = j.get("name") or ident
-                model = j.get("model")
-                out.append(LocationFix(
-                    identifier=ident,
-                    name=name,
-                    model=model,
-                    latitude=float(report.latitude),
-                    longitude=float(report.longitude),
-                    horizontal_accuracy=float(report.horizontal_accuracy),
-                    timestamp_unix=int(report.timestamp.timestamp()),
-                ))
-        elif reports is not None:
-            # Single accessory case — wrap into a 1-element dict equivalent
-            j = self.accessories[0].to_json() if self.accessories else {}
+        for acc, report in results:
+            if report is None:
+                continue
+            j = acc.to_json() if hasattr(acc, "to_json") else {}
+            ident = j.get("identifier") or getattr(acc, "name", "unknown")
+            name = j.get("name") or ident
+            model = j.get("model")
             out.append(LocationFix(
-                identifier=j.get("identifier", "?"),
-                name=j.get("name") or j.get("identifier", "?"),
-                model=j.get("model"),
-                latitude=float(reports.latitude),
-                longitude=float(reports.longitude),
-                horizontal_accuracy=float(reports.horizontal_accuracy),
-                timestamp_unix=int(reports.timestamp.timestamp()),
+                identifier=ident,
+                name=name,
+                model=model,
+                latitude=float(report.latitude),
+                longitude=float(report.longitude),
+                horizontal_accuracy=float(report.horizontal_accuracy),
+                timestamp_unix=int(report.timestamp.timestamp()),
             ))
         log.info("fetch_locations got %d location reports", len(out))
         return out
