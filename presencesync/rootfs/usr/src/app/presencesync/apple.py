@@ -218,11 +218,30 @@ class AppleClient:
         if self.account is None:
             return
         try:
-            getstate = getattr(self.account, "__getstate__", None)
-            if callable(getstate):
-                blob = getstate()
+            # findmy.py 0.10+ exposes the AccountStateMapping via a .state
+            # property or .export_state() — prefer that over __getstate__,
+            # which returns the full __dict__ with unpicklable bits like the
+            # running uvloop event loop and aiohttp internals.
+            blob = None
+            for attr_name in ("state", "state_info", "to_state", "export_state",
+                              "get_state_mapping", "to_dict"):
+                attr = getattr(self.account, attr_name, None)
+                if attr is None:
+                    continue
+                try:
+                    blob = attr() if callable(attr) else attr
+                    if isinstance(blob, dict) and "ids" in blob:
+                        log.debug("apple_state: source = .%s (good shape)", attr_name)
+                        break
+                    blob = None
+                except Exception:
+                    continue
+            if blob is None:
+                getstate = getattr(self.account, "__getstate__", None)
+                if callable(getstate):
+                    blob = getstate()
+                    log.debug("apple_state: source = __getstate__ (will filter)")
+            if blob is not None:
                 state.save_apple_state(blob)
-                log.debug("apple_state: persisted %d top-level keys",
-                          len(blob) if isinstance(blob, dict) else 0)
         except Exception:
             log.warning("Could not persist Apple state", exc_info=True)

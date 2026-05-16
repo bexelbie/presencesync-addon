@@ -111,9 +111,16 @@ def save_apple_state(state: object) -> None:
     payload = state
     # If we got a dict, filter to AccountStateMapping schema keys first.
     if isinstance(state, dict):
+        all_keys = sorted(state.keys())
         payload = {k: v for k, v in state.items() if k in _APPLE_STATE_KEEP_KEYS}
-        log.info("apple_state: keeping %d/%d top-level keys (%s)",
-                 len(payload), len(state), sorted(payload.keys()))
+        log.info("apple_state: keeping %d/%d top-level keys (%s); ALL keys present: %s",
+                 len(payload), len(state), sorted(payload.keys()), all_keys)
+        # If the AccountStateMapping filter caught nothing, the dict is probably
+        # the full __dict__ (with leading-underscore field names) rather than
+        # the schema'd export. Try pickling the whole thing and let the per-key
+        # fallback drop the unpicklable uvloop bits.
+        if not payload:
+            payload = state
     try:
         data = pickle.dumps(payload)
     except (TypeError, ValueError) as err:
