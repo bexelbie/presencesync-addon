@@ -58,8 +58,20 @@
 
   <section id="setup-2fa" hidden>
     <h2>Two-factor code</h2>
-    <p class="muted">A 6-digit code was sent to your trusted Apple devices.</p>
-    <label>Code <input id="apple-2fa-code" placeholder="123456" inputmode="numeric" maxlength="6"/></label>
+    <p class="muted">A 6-digit code should have appeared as a notification (<em>Apple ID Sign-In Requested</em>) on your trusted Apple devices. Tap <strong>Allow</strong> to reveal it.</p>
+    <details class="hint">
+      <summary>Notification didn't arrive?</summary>
+      <p class="muted">
+        Apple sometimes silently suppresses push notifications for third-party auth. To get a code manually:
+      </p>
+      <ol class="muted">
+        <li>Put the iPhone/iPad you're getting the code from into <strong>Airplane Mode</strong></li>
+        <li>Open <strong>Settings</strong> → tap your name at the top → <strong>Sign-In & Security</strong> → <strong>Get Verification Code</strong></li>
+        <li>A 6-digit code displays — enter it below, then submit before exiting Airplane Mode</li>
+      </ol>
+      <p class="muted">The Airplane Mode step prevents iOS from auto-completing the flow while you're typing the code into PresenceSync.</p>
+    </details>
+    <label>Code <input id="apple-2fa-code" placeholder="123456" inputmode="numeric" maxlength="6" autocomplete="one-time-code"/></label>
     <button id="apple-2fa-submit">Submit</button>
     <button class="ghost" id="apple-2fa-request">Resend code</button>
   </section>
