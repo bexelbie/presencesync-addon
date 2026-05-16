@@ -15,7 +15,8 @@ import aiohttp
 log = logging.getLogger(__name__)
 
 SUPERVISOR_BASE = "http://supervisor"
-TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
+# HA sets SUPERVISOR_TOKEN for modern add-ons; legacy installs use HASSIO_TOKEN.
+TOKEN = os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HASSIO_TOKEN") or ""
 
 
 def _headers() -> dict[str, str]:

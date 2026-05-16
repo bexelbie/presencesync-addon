@@ -34,16 +34,21 @@ async def _auto_configure() -> None:
     log.info("auto-configure starting; SUPERVISOR_TOKEN present=%s",
              bool(os.environ.get("SUPERVISOR_TOKEN")))
 
-    # Always re-discover anisette URL — the sibling add-on's hostname is HA-generated
-    # and the user shouldn't need to know it.
+    # Anisette URL precedence:
+    #   1. existing user-set value (sticky across restarts)
+    #   2. Supervisor /addons sibling discovery (if creds available)
+    #   3. http://homeassistant.local:6969 (works as long as the Anisette add-on
+    #      is installed with its default ports: 6969/tcp: 6969 mapping)
+    env_default = os.environ.get("PRESENCESYNC_ANISETTE_URL", "http://homeassistant.local:6969")
     discovered_anisette = await supervisor.discover_anisette_url()
-    log.info("auto-configure: anisette discovery returned %s (prev=%s)",
-             discovered_anisette, s.apple.anisette_url)
+    log.info("auto-configure: anisette discovery returned %s (prev=%s, env=%s)",
+             discovered_anisette, s.apple.anisette_url, env_default)
+    # If the previously-stored URL is the broken default, replace it.
+    broken = (s.apple.anisette_url or "").startswith("http://local-anisette")
     if discovered_anisette:
         await state.update(lambda x: setattr(x.apple, "anisette_url", discovered_anisette))
-    elif not s.apple.anisette_url:
-        await state.update(lambda x: setattr(x.apple, "anisette_url",
-                                             os.environ.get("PRESENCESYNC_ANISETTE_URL", "")))
+    elif broken or not s.apple.anisette_url:
+        await state.update(lambda x: setattr(x.apple, "anisette_url", env_default))
     if not s.mqtt.discovery_prefix:
         await state.update(lambda x: setattr(x.mqtt, "discovery_prefix",
                                              os.environ.get("PRESENCESYNC_DISCOVERY_PREFIX", "homeassistant")))
@@ -137,9 +142,18 @@ async def index(request: Request):
 async def supervisor_debug():
     """Dump what Supervisor tells us — for diagnosing addon discovery."""
     import aiohttp
-    token = os.environ.get("SUPERVISOR_TOKEN", "")
+    token = supervisor.TOKEN
     headers = {"Authorization": f"Bearer {token}"}
-    out = {"token_present": bool(token), "addons": None, "info": None, "error": None}
+    # Include the env vars HA might be using to inject the token
+    env_keys = sorted(k for k in os.environ.keys()
+                      if any(p in k.upper() for p in ("TOKEN", "HASSIO", "SUPERVISOR", "INGRESS")))
+    out = {
+        "token_present": bool(token),
+        "env_with_token_keys": env_keys,
+        "addons": None,
+        "info": None,
+        "error": None,
+    }
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
             async with s.get("http://supervisor/addons", headers=headers) as r:

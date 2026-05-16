@@ -7,7 +7,7 @@ OPTIONS_FILE=/data/options.json
 if [ -f "$OPTIONS_FILE" ]; then
     export PRESENCESYNC_LOG_LEVEL=$(jq -r '.log_level // "info"' "$OPTIONS_FILE")
     export PRESENCESYNC_POLL_INTERVAL=$(jq -r '.poll_interval_seconds // 60' "$OPTIONS_FILE")
-    export PRESENCESYNC_ANISETTE_URL=$(jq -r '.anisette_url // "http://local-anisette:6969"' "$OPTIONS_FILE")
+    export PRESENCESYNC_ANISETTE_URL=$(jq -r '.anisette_url // "http://homeassistant.local:6969"' "$OPTIONS_FILE")
     export PRESENCESYNC_DISCOVERY_PREFIX=$(jq -r '.mqtt_discovery_prefix // "homeassistant"' "$OPTIONS_FILE")
     export PRESENCESYNC_STATE_PREFIX=$(jq -r '.state_prefix // "presencesync"' "$OPTIONS_FILE")
 fi

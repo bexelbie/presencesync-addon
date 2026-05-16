@@ -42,7 +42,11 @@
     <h2>3. Apple ID</h2>
     <label>Apple ID <input id="apple-username" type="email"></label>
     <label>Password <input id="apple-password" type="password"></label>
-    <label>Anisette URL <input id="apple-anisette" placeholder="http://b1c3d05c-anisette:6969"></label>
+    <label>
+      Anisette URL
+      <input id="apple-anisette" placeholder="auto-detected from sibling add-on">
+      <small>Leave blank to auto-detect. Override only if your HA Supervisor doesn't expose Anisette by hostname — e.g. set to <code>http://homeassistant.local:6969</code> if you've port-mapped Anisette to the host.</small>
+    </label>
     <button id="apple-login">Log in</button>
     <pre id="apple-out"></pre>
   </section>

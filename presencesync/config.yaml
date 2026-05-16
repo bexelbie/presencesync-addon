@@ -1,5 +1,5 @@
 name: PresenceSync
-version: "0.1.9"
+version: "0.1.10"
 slug: presencesync
 description: Track Apple AirTags, AirPods, iPhones, iPads, Macs, and Apple Watches in Home Assistant. One-time setup via web UI — no MQTT bridge running on your Mac, no SSH keys, no YAML.
 arch:
@@ -31,7 +31,7 @@ map:
 options:
   log_level: info
   poll_interval_seconds: 60
-  anisette_url: http://local-anisette:6969
+  anisette_url: http://homeassistant.local:6969
   mqtt_discovery_prefix: homeassistant
   state_prefix: presencesync
 schema:
