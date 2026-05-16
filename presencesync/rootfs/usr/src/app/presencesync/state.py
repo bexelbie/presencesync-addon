@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("presencesync.state")
 
 DATA_DIR = Path(os.environ.get("PRESENCESYNC_DATA_DIR", "/data"))
 CONFIG_PATH = DATA_DIR / "presencesync.json"
@@ -96,20 +96,50 @@ async def update(mutator) -> Settings:
 
 
 # --- Apple auth state ---------------------------------------------------
-# AsyncAppleAccount.__getstate__() returns a nested dict with bytes, datetimes,
-# and (for some anisette providers) closure-bound callables. JSON with
-# `default=str` silently converts those to strings on save — and on restore
-# they're no longer reconstructable, so the saved state always fails to load
-# and we end up re-prompting for 2FA every restart. Use pickle, which
-# roundtrips everything cleanly.
+# We save the AccountStateMapping subset of AsyncAppleAccount.__getstate__()
+# rather than the full __dict__: the full dict contains a reference to the
+# running uvloop event loop, which can't be pickled (uvloop.Loop has a
+# non-trivial __cinit__ and refuses pickle protocol). The subset is enough
+# for AsyncAppleAccount(state_info=...) to reconstruct the session.
+
+_APPLE_STATE_KEEP_KEYS = ("type", "ids", "account", "login", "anisette")
+
 
 def save_apple_state(state: object) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
     import pickle
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    payload = state
+    # If we got a dict, filter to AccountStateMapping schema keys first.
+    if isinstance(state, dict):
+        payload = {k: v for k, v in state.items() if k in _APPLE_STATE_KEEP_KEYS}
+        log.info("apple_state: keeping %d/%d top-level keys (%s)",
+                 len(payload), len(state), sorted(payload.keys()))
+    try:
+        data = pickle.dumps(payload)
+    except (TypeError, ValueError) as err:
+        log.warning("apple_state: pickle failed (%s) — saving per-key best-effort", err)
+        # Last-resort: try to pickle each value individually, drop the ones
+        # that fail. This usually keeps the auth tokens while dropping any
+        # cached aiohttp sessions or loop references that snuck in.
+        if isinstance(payload, dict):
+            cleaned = {}
+            for k, v in payload.items():
+                try:
+                    pickle.dumps(v)
+                    cleaned[k] = v
+                except Exception:
+                    log.debug("apple_state: skipping unpicklable key %s", k)
+            try:
+                data = pickle.dumps(cleaned)
+                log.info("apple_state: salvaged %d keys after filter", len(cleaned))
+            except Exception as err2:
+                log.warning("apple_state: even per-key filter failed: %s", err2)
+                return
+        else:
+            return
     tmp = APPLE_STATE_PATH.with_suffix(".tmp")
-    tmp.write_bytes(pickle.dumps(state))
+    tmp.write_bytes(data)
     tmp.replace(APPLE_STATE_PATH)
-    # remove any stale JSON copy from older versions
     APPLE_STATE_PATH_LEGACY.unlink(missing_ok=True)
 
 
