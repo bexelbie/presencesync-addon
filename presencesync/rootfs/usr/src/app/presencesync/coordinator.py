@@ -68,8 +68,11 @@ class Coordinator:
         s = state.get()
         self.last_run_unix = int(time.time())
 
-        # AirTags / accessories via findmy.py gateway (needs bundle + login)
-        if s.bundle_uploaded and self.apple.last_login_state == LoginState.LOGGED_IN:
+        # AirTags / accessories via findmy.py gateway (needs bundle + login + enabled)
+        if not s.tracking.include_airtags:
+            log.debug("AirTag fetch skipped: include_airtags=False")
+            self.last_fixes = []
+        elif s.bundle_uploaded and self.apple.last_login_state == LoginState.LOGGED_IN:
             log.info("tick: fetching AirTag locations for %d accessories",
                      len(self.apple.accessories))
             try:
@@ -86,8 +89,11 @@ class Coordinator:
             log.debug("AirTag fetch skipped: bundle=%s apple=%s",
                       s.bundle_uploaded, self.apple.last_login_state)
 
-        # Family + owned devices via pyicloud (separate auth)
-        if self.icloud.login_state == "logged_in":
+        # Family + owned devices via pyicloud (separate auth + enabled)
+        if not s.tracking.include_devices:
+            log.debug("iCloud device fetch skipped: include_devices=False")
+            self.last_device_fixes = []
+        elif self.icloud.login_state == "logged_in":
             log.info("tick: fetching iCloud devices")
             try:
                 # pyicloud is sync — run in thread pool to keep async loop responsive

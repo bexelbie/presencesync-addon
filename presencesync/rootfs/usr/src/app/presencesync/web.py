@@ -241,8 +241,10 @@ async def health():
     s = state.get()
     login_state = str(coord.apple.last_login_state)
 
-    # Apple
-    if "LOGGED_IN" in login_state:
+    # Apple (AirTags via findmy.py)
+    if not s.tracking.include_airtags:
+        apple = {"status": "disabled", "detail": "AirTags source is off"}
+    elif "LOGGED_IN" in login_state:
         apple = {"status": "healthy",
                  "detail": f"Logged in as {s.apple.username or '?'}"}
     elif "REQUIRE_2FA" in login_state:
@@ -283,9 +285,11 @@ async def health():
         anisette = {"status": "unreachable",
                     "detail": "No anisette URL configured"}
 
-    # Bundle
+    # Bundle (only relevant when AirTags is enabled)
     n_acc = len(coord.apple.accessories)
-    if s.bundle_uploaded and n_acc:
+    if not s.tracking.include_airtags:
+        bundle_h = {"status": "disabled", "detail": "AirTags source is off — bundle not needed"}
+    elif s.bundle_uploaded and n_acc:
         bundle_h = {"status": "healthy",
                     "detail": f"{n_acc} item(s) loaded"}
     elif s.bundle_uploaded and not n_acc:
@@ -297,7 +301,9 @@ async def health():
 
     # iCloud (family + owned Apple devices)
     ic_state = coord.icloud.login_state
-    if ic_state == "logged_in":
+    if not s.tracking.include_devices:
+        icloud_h = {"status": "disabled", "detail": "iDevices source is off"}
+    elif ic_state == "logged_in":
         icloud_h = {"status": "healthy", "detail": f"{len(coord.last_device_fixes)} device(s) reporting"}
     elif ic_state == "needs_2fa":
         icloud_h = {"status": "needs_2fa", "detail": "iCloud needs a 6-digit 2FA code"}
@@ -341,9 +347,14 @@ async def health():
                                 d.horizontal_accuracy, d.timestamp_unix,
                                 d.identifier, "device"))
 
-    # Overall summary — iCloud is optional (warn if not healthy but don't degrade overall)
-    must_be_healthy = (apple, mqtt_h, anisette, bundle_h)
-    overall = "healthy" if all(x["status"] == "healthy" for x in must_be_healthy) else "degraded"
+    # Overall summary — disabled sources count as healthy. iCloud is optional.
+    def _is_ok(card):
+        return card["status"] in ("healthy", "disabled")
+    must_be_ok = (apple, mqtt_h, bundle_h)
+    # anisette only matters if AirTags enabled
+    if s.tracking.include_airtags:
+        must_be_ok = must_be_ok + (anisette,)
+    overall = "healthy" if all(_is_ok(x) for x in must_be_ok) else "degraded"
 
     return {
         "overall": overall,
@@ -357,6 +368,10 @@ async def health():
         "items": items,
         "anisette_url": s.apple.anisette_url,
         "apple_username": s.apple.username,
+        "sources": {
+            "include_airtags": s.tracking.include_airtags,
+            "include_devices": s.tracking.include_devices,
+        },
     }
 
 
@@ -639,6 +654,20 @@ async def rediscover():
         "home": {"latitude": s.home.latitude, "longitude": s.home.longitude, "radius_m": s.home.radius_m} if home_info else None,
         "anisette_url": s.apple.anisette_url if anisette_url else None,
     }
+
+
+@app.post("/api/sources")
+async def set_sources(body: dict):
+    """Toggle which backends are active."""
+    def m(s):
+        if "include_airtags" in body:
+            s.tracking.include_airtags = bool(body["include_airtags"])
+        if "include_devices" in body:
+            s.tracking.include_devices = bool(body["include_devices"])
+    await state.update(m)
+    s = state.get()
+    return {"include_airtags": s.tracking.include_airtags,
+            "include_devices": s.tracking.include_devices}
 
 
 @app.post("/api/poll-now")

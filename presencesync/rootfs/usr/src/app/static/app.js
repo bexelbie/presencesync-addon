@@ -20,7 +20,7 @@ async function api(path, opts = {}) {
 
 function setCard(id, statusKind, headerText, bodyText) {
   const card = $("#card-" + id);
-  card.classList.remove("healthy", "warn", "err");
+  card.classList.remove("healthy", "warn", "err", "disabled");
   card.classList.add(statusKind);
   card.querySelector(".card-h").textContent = headerText;
   card.querySelector(".card-b").textContent = bodyText;
@@ -37,6 +37,7 @@ function relTime(unix) {
 
 function statusToCardKind(status) {
   if (status === "healthy") return "healthy";
+  if (status === "disabled") return "disabled";
   if (status === "needs_2fa" || status === "needs_login" || status === "needs_upload") return "warn";
   return "err";
 }
@@ -90,13 +91,19 @@ async function refresh() {
   $("#items-count").textContent = h.items.length ? `(${h.items.length})` : "";
   $("#items-empty").hidden = h.items.length > 0;
 
-  // Setup sections — hide when each component is healthy
-  $("#setup-bundle").hidden = h.bundle.status === "healthy";
-  const appleHealthy = h.apple.status === "healthy";
-  const icloudHealthy = h.icloud.status === "healthy";
-  const bothLoggedIn = appleHealthy && icloudHealthy;
+  // Sources toggles — reflect current state
+  if (h.sources) {
+    $("#src-airtags").checked = !!h.sources.include_airtags;
+    $("#src-devices").checked = !!h.sources.include_devices;
+  }
+
+  // Setup sections — hide when each component is healthy OR disabled
+  const bundleOk = h.bundle.status === "healthy" || h.bundle.status === "disabled";
+  $("#setup-bundle").hidden = bundleOk;
+  const appleOk = h.apple.status === "healthy" || h.apple.status === "disabled";
+  const icloudOk = h.icloud.status === "healthy" || h.icloud.status === "disabled";
   const needs2fa = h.apple.status === "needs_2fa" || h.icloud.status === "needs_2fa";
-  $("#setup-apple").hidden = bothLoggedIn || needs2fa;
+  $("#setup-apple").hidden = (appleOk && icloudOk) || needs2fa;
   $("#setup-2fa").hidden = !needs2fa;
 
   // Pre-fill known fields
@@ -162,6 +169,18 @@ $("#apple-2fa-request").onclick = async () => {
   try { await api("/api/apple/2fa/request", { method: "POST", body: { method: 0 }}); }
   catch (e) { alert("Resend failed: " + e.message); }
 };
+
+async function saveSources() {
+  try {
+    await api("/api/sources", { method: "POST", body: {
+      include_airtags: $("#src-airtags").checked,
+      include_devices: $("#src-devices").checked,
+    }});
+  } catch (e) { /* show on next refresh */ }
+  refresh();
+}
+$("#src-airtags").onchange = saveSources;
+$("#src-devices").onchange = saveSources;
 
 $("#poll-now").onclick = async () => {
   const btn = $("#poll-now");

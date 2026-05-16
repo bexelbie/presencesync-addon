@@ -53,6 +53,12 @@ a { color: inherit; }
 .card.healthy .card-h::before { color: var(--ok); }
 .card.warn .card-h::before    { color: var(--warn); }
 .card.err .card-h::before     { color: var(--err); }
+.card.disabled { opacity: 0.55; }
+.card.disabled .card-h::before { color: color-mix(in oklch, currentColor 40%, transparent); }
+
+label.check { display: flex; align-items: baseline; gap: 0.5rem; padding: 0.3rem 0; cursor: pointer; }
+label.check input { margin: 0; }
+label.check span { display: inline; }
 .card-b { font-size: 0.8rem; opacity: 0.85; margin-top: 0.35rem; line-height: 1.4; }
 
 /* Items table */
