@@ -17,12 +17,6 @@
 </header>
 
 <main>
-  <section id="sources">
-    <h2>Sources</h2>
-    <label class="check"><input type="checkbox" id="src-airtags"/> <span>AirTags &amp; accessories</span> <span class="muted">— via Apple's BLE-relay network</span></label>
-    <label class="check"><input type="checkbox" id="src-devices"/> <span>iDevices &amp; family</span> <span class="muted">— iPhones, iPads, Macs, Watches</span></label>
-  </section>
-
   <section id="health">
     <div class="cards">
       <div class="card" id="card-apple"><div class="card-h">Apple (AirTags)</div><div class="card-b">…</div></div>
@@ -38,7 +32,13 @@
   </section>
 
   <section id="items">
-    <h2>Tracked items <span class="muted" id="items-count"></span></h2>
+    <h2>
+      Tracked items <span class="muted" id="items-count"></span>
+      <span class="src-toggles">
+        <label class="pill-toggle"><input type="checkbox" id="src-airtags"/><span>AirTags</span></label>
+        <label class="pill-toggle"><input type="checkbox" id="src-devices"/><span>iDevices</span></label>
+      </span>
+    </h2>
     <table id="items-table">
       <thead><tr><th>Name</th><th>Model</th><th>State</th><th>Last seen</th><th>Accuracy</th></tr></thead>
       <tbody id="items-tbody"></tbody>

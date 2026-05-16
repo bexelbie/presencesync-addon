@@ -56,9 +56,31 @@ a { color: inherit; }
 .card.disabled { opacity: 0.55; }
 .card.disabled .card-h::before { color: color-mix(in oklch, currentColor 40%, transparent); }
 
-label.check { display: flex; align-items: baseline; gap: 0.5rem; padding: 0.3rem 0; cursor: pointer; }
-label.check input { margin: 0; }
-label.check span { display: inline; }
+/* Pill-style toggle next to the Tracked items heading */
+h2 .src-toggles { float: right; display: inline-flex; gap: 0.35rem; font-weight: 400; }
+.pill-toggle {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  padding: 0.15rem 0.6rem 0.15rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  user-select: none;
+  opacity: 0.6;
+  transition: opacity 0.1s, background 0.1s;
+}
+.pill-toggle:has(input:checked) {
+  opacity: 1;
+  background: color-mix(in oklch, var(--ok) 14%, transparent);
+  border-color: color-mix(in oklch, var(--ok) 50%, transparent);
+  color: var(--ok);
+}
+.pill-toggle input { appearance: none; width: 0; height: 0; margin: 0; }
+.pill-toggle::before {
+  content: "○"; font-size: 0.9rem; line-height: 1;
+  color: color-mix(in oklch, currentColor 50%, transparent);
+}
+.pill-toggle:has(input:checked)::before { content: "●"; color: var(--ok); }
 .card-b { font-size: 0.8rem; opacity: 0.85; margin-top: 0.35rem; line-height: 1.4; }
 
 /* Items table */
