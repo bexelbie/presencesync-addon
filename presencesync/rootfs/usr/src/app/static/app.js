@@ -6,9 +6,10 @@ async function api(path, opts = {}) {
     o.body = opts.body instanceof FormData ? opts.body : JSON.stringify(opts.body);
     if (!(opts.body instanceof FormData)) o.headers["Content-Type"] = "application/json";
   }
-  // Resolve API paths relative to the current page so HA Ingress works:
-  // under ingress the path becomes /api/hassio_ingress/<token>/api/...
-  const r = await fetch(path.startsWith("/") ? "." + path : path, o);
+  // <base href="..."> in index.html sets the document base, so a leading-slash
+  // path here would still escape it. Strip it so the fetch resolves to
+  // <base>/api/... and the request actually reaches the addon under HA Ingress.
+  const r = await fetch(path.replace(/^\//, ""), o);
   const t = await r.text();
   let data;
   try { data = JSON.parse(t); } catch { data = t; }

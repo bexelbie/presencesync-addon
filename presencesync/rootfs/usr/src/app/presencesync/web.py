@@ -52,9 +52,16 @@ app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="stati
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
+    # Under HA Ingress the page is reached at /api/hassio_ingress/<token>/ and
+    # HA strips that prefix before passing the request here. Tell the browser
+    # the right <base href> so all relative paths (static assets + fetch())
+    # resolve to /api/hassio_ingress/<token>/... not the HA root.
+    ingress_path = request.headers.get("X-Ingress-Path", "")
+    base_href = ingress_path + "/" if ingress_path and not ingress_path.endswith("/") else (ingress_path or "./")
     return TEMPLATES.TemplateResponse("index.html", {
         "request": request,
         "version": getattr(__import__("presencesync"), "__version__", "?"),
+        "base_href": base_href,
     })
 
 
