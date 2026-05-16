@@ -160,6 +160,17 @@ $("#apple-2fa-request").onclick = async () => {
   catch (e) { alert("Resend failed: " + e.message); }
 };
 
+$("#poll-now").onclick = async () => {
+  const btn = $("#poll-now");
+  btn.disabled = true;
+  btn.textContent = "Polling…";
+  try { await api("/api/poll-now", { method: "POST" }); }
+  catch (e) { /* swallow — refresh will surface state */ }
+  btn.disabled = false;
+  btn.textContent = "Refresh now";
+  refresh();
+};
+
 // kick things off
 refresh();
 setInterval(refresh, 10000);
