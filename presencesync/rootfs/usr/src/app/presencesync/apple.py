@@ -12,6 +12,7 @@ from typing import Optional
 from findmy import AsyncAppleAccount, FindMyAccessory, LoginState
 from findmy.reports.anisette import RemoteAnisetteProvider
 from findmy.plist import list_accessories
+from findmy import plist as _fm_plist  # for monkey-patching _DEFAULT_SEARCH_PATH
 
 from . import state
 
@@ -129,6 +130,11 @@ class AppleClient:
         # findmy expects the bundle to look like ~/Library/com.apple.icloud.searchpartyd/
         # i.e. OwnedBeacons/, BeaconNamingRecord/, KeyAlignmentRecords/ at the root.
         # Our bundle.tar.gz lays them out exactly that way.
+        # findmy.plist.list_accessories has a bug: it accepts search_path but DOESN'T
+        # forward it to _get_accessory_name / _get_alignment_plist, which fall back
+        # to ~/Library/com.apple.icloud.searchpartyd (doesn't exist in this container).
+        # Monkey-patch _DEFAULT_SEARCH_PATH so the helpers find our bundle.
+        _fm_plist._DEFAULT_SEARCH_PATH = bundle_dir
         self.accessories = list_accessories(key=self.beaconstore_key, search_path=bundle_dir)
         log.info("Loaded bundle: %d accessories", len(self.accessories))
         for a in self.accessories:
