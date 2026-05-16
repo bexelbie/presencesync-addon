@@ -1,6 +1,7 @@
 """FastAPI web UI + REST API. Serves the HA ingress panel."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import tarfile
