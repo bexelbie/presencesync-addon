@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import state
 from .apple import AppleClient
+from .icloud import ICloudClient
 from .mqtt import MqttPublisher
 
 log = logging.getLogger(__name__)
@@ -21,9 +22,11 @@ class Coordinator:
 
     def __init__(self):
         self.apple = AppleClient()
+        self.icloud = ICloudClient()
         self.mqtt = MqttPublisher()
         self.last_run_unix: int = 0
-        self.last_fixes: list = []
+        self.last_fixes: list = []          # AirTags + accessories (LocationFix)
+        self.last_device_fixes: list = []   # iPhones / iPads / Macs / Watches (DeviceFix)
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
 
@@ -63,23 +66,44 @@ class Coordinator:
 
     async def _tick(self):
         s = state.get()
-        if not s.bundle_uploaded:
-            log.info("tick skipped: bundle not uploaded yet")
-            return
-        if self.apple.last_login_state != LoginState.LOGGED_IN:
-            log.info("tick skipped: not logged in (state=%s) — sign in via the web UI",
-                     self.apple.last_login_state)
-            return
-        log.info("tick: starting fetch_locations for %d accessories", len(self.apple.accessories))
-        fixes = await self.apple.fetch_locations()
         self.last_run_unix = int(time.time())
-        self.last_fixes = fixes
-        log.info("Apple gateway returned %d fixes", len(fixes))
-        for fix in fixes:
+
+        # AirTags / accessories via findmy.py gateway (needs bundle + login)
+        if s.bundle_uploaded and self.apple.last_login_state == LoginState.LOGGED_IN:
+            log.info("tick: fetching AirTag locations for %d accessories",
+                     len(self.apple.accessories))
             try:
-                self.mqtt.publish_fix(fix)
+                fixes = await self.apple.fetch_locations()
+                self.last_fixes = fixes
+                for fix in fixes:
+                    try:
+                        self.mqtt.publish_fix(fix)
+                    except Exception:
+                        log.exception("mqtt publish failed for %s", fix.name)
             except Exception:
-                log.exception("mqtt publish failed for %s", fix.name)
+                log.exception("AirTag fetch failed")
+        else:
+            log.debug("AirTag fetch skipped: bundle=%s apple=%s",
+                      s.bundle_uploaded, self.apple.last_login_state)
+
+        # Family + owned devices via pyicloud (separate auth)
+        if self.icloud.login_state == "logged_in":
+            log.info("tick: fetching iCloud devices")
+            try:
+                # pyicloud is sync — run in thread pool to keep async loop responsive
+                device_fixes = await asyncio.get_event_loop().run_in_executor(
+                    None, self.icloud.fetch_devices
+                )
+                self.last_device_fixes = device_fixes
+                for d in device_fixes:
+                    try:
+                        self.mqtt.publish_device_fix(d)
+                    except Exception:
+                        log.exception("mqtt publish failed for device %s", d.name)
+            except Exception:
+                log.exception("iCloud device fetch failed")
+        else:
+            log.debug("iCloud fetch skipped: state=%s", self.icloud.login_state)
 
     async def reload_mqtt(self):
         self.mqtt.configure()

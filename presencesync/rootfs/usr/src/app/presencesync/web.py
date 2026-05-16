@@ -294,6 +294,17 @@ async def health():
         bundle_h = {"status": "needs_upload",
                     "detail": "Run the extractor on your Mac and upload presencesync-bundle.tar.gz"}
 
+    # iCloud (family + owned Apple devices)
+    ic_state = coord.icloud.login_state
+    if ic_state == "logged_in":
+        icloud_h = {"status": "healthy", "detail": f"{len(coord.last_device_fixes)} device(s) reporting"}
+    elif ic_state == "needs_2fa":
+        icloud_h = {"status": "needs_2fa", "detail": "iCloud needs a 6-digit 2FA code"}
+    elif ic_state == "logged_out":
+        icloud_h = {"status": "needs_login", "detail": "iCloud (family + devices) not authenticated"}
+    else:
+        icloud_h = {"status": "needs_login", "detail": f"iCloud state: {ic_state}"}
+
     # Items (most recent state) — include the home/away resolution so the
     # dashboard can show it without re-implementing haversine in JS.
     import math
@@ -306,35 +317,39 @@ async def health():
         return 2 * r * math.asin(math.sqrt(a))
 
     items = []
-    for f in coord.last_fixes:
+    def _make_item(name, model, lat, lon, acc, ts, ident, kind):
         if s.home.latitude:
-            dist = _haversine_m(f.latitude, f.longitude, s.home.latitude, s.home.longitude)
+            dist = _haversine_m(lat, lon, s.home.latitude, s.home.longitude)
             state_val = "home" if dist <= s.home.radius_m else "away"
         else:
             dist = None
             state_val = "unknown"
-        items.append({
-            "identifier": f.identifier,
-            "name": f.name,
-            "model": f.model,
-            "latitude": f.latitude,
-            "longitude": f.longitude,
-            "horizontal_accuracy": f.horizontal_accuracy,
-            "timestamp_unix": f.timestamp_unix,
-            "state": state_val,
-            "distance_from_home_m": dist,
-        })
+        return {
+            "identifier": ident, "name": name, "model": model,
+            "latitude": lat, "longitude": lon, "horizontal_accuracy": acc,
+            "timestamp_unix": ts, "state": state_val,
+            "distance_from_home_m": dist, "kind": kind,
+        }
 
-    # Overall summary
-    overall = "healthy" if all(
-        x["status"] == "healthy" for x in (apple, mqtt_h, anisette, bundle_h)
-    ) else "degraded"
+    for f in coord.last_fixes:
+        items.append(_make_item(f.name, f.model, f.latitude, f.longitude,
+                                f.horizontal_accuracy, f.timestamp_unix,
+                                f.identifier, "airtag"))
+    for d in coord.last_device_fixes:
+        items.append(_make_item(d.name, d.model, d.latitude, d.longitude,
+                                d.horizontal_accuracy, d.timestamp_unix,
+                                d.identifier, "device"))
+
+    # Overall summary — iCloud is optional (warn if not healthy but don't degrade overall)
+    must_be_healthy = (apple, mqtt_h, anisette, bundle_h)
+    overall = "healthy" if all(x["status"] == "healthy" for x in must_be_healthy) else "degraded"
 
     return {
         "overall": overall,
         "now_unix": int(_time.time()),
         "last_poll_unix": coord.last_run_unix,
         "apple": apple,
+        "icloud": icloud_h,
         "mqtt": mqtt_h,
         "anisette": anisette,
         "bundle": bundle_h,
@@ -372,6 +387,13 @@ async def set_home(body: dict):
 
 @app.post("/api/apple/login")
 async def apple_login(body: dict):
+    """Authenticate to BOTH backends with the same Apple ID:
+       - findmy.py (gateway.icloud.com) for AirTags
+       - pyicloud  (fmipmobile.icloud.com) for family + own iPhone/iPad/Mac/Watch
+    Apple sends 2FA codes per session; same 6-digit code typically validates
+    both because they're within the validity window. /api/apple/2fa/submit
+    applies the user's code to both.
+    """
     username = body.get("username") or ""
     password = body.get("password") or ""
     anisette = body.get("anisette_url") or state.get().apple.anisette_url
@@ -383,17 +405,31 @@ async def apple_login(body: dict):
         s.apple.anisette_url = anisette
     await state.update(m)
     coord = get_coord()
-    # Force a fresh account with the new anisette
+
+    # ─── findmy.py login (AirTags) ───────────────────────────────────────
     coord.apple.account = None
     coord.apple.anisette = None
     state.clear_apple_state()
     await coord.apple.ensure_account()
+    findmy_state = "ERROR"
     try:
-        result = await coord.apple.login(username, password)
+        findmy_state = str(await coord.apple.login(username, password))
     except Exception as e:
-        log.exception("apple login raised")
-        raise HTTPException(500, f"login error: {type(e).__name__}: {e}")
-    return {"login_state": str(result)}
+        log.exception("findmy.py login raised")
+        findmy_state = f"ERROR: {type(e).__name__}: {e}"
+
+    # ─── pyicloud login (family + owned Apple devices) ───────────────────
+    icloud_state = "ERROR"
+    try:
+        icloud_state = await asyncio.get_event_loop().run_in_executor(
+            None, coord.icloud.login, username, password
+        )
+    except Exception as e:
+        log.exception("pyicloud login raised")
+        icloud_state = f"ERROR: {type(e).__name__}: {e}"
+
+    return {"login_state": findmy_state, "findmy_state": findmy_state,
+            "icloud_state": icloud_state}
 
 
 @app.post("/api/apple/2fa/request")
@@ -409,15 +445,35 @@ async def apple_request_2fa(body: dict):
 
 @app.post("/api/apple/2fa/submit")
 async def apple_submit_2fa(body: dict):
+    """Submit the 2FA code to BOTH findmy.py and pyicloud (same code works)."""
     code = body.get("code") or ""
     if not code:
         raise HTTPException(400, "code required")
     coord = get_coord()
+
+    # findmy.py
+    findmy_state = "ERROR"
     try:
-        result = await coord.apple.submit_2fa(code)
+        findmy_state = str(await coord.apple.submit_2fa(code))
     except Exception as e:
-        raise HTTPException(500, f"{type(e).__name__}: {e}")
-    return {"login_state": str(result)}
+        log.warning("findmy.py 2FA submit failed: %s", e)
+        findmy_state = f"ERROR: {type(e).__name__}: {e}"
+
+    # pyicloud
+    icloud_state = coord.icloud.login_state
+    if icloud_state == "needs_2fa":
+        try:
+            icloud_state = await asyncio.get_event_loop().run_in_executor(
+                None, coord.icloud.submit_2fa, code
+            )
+        except Exception as e:
+            log.warning("pyicloud 2FA submit failed: %s", e)
+            icloud_state = f"ERROR: {type(e).__name__}: {e}"
+
+    if "LOGGED_IN" in findmy_state or icloud_state == "logged_in":
+        return {"login_state": findmy_state, "findmy_state": findmy_state,
+                "icloud_state": icloud_state}
+    raise HTTPException(500, f"Both 2FAs failed: findmy={findmy_state} icloud={icloud_state}")
 
 
 @app.post("/api/bundle/upload")

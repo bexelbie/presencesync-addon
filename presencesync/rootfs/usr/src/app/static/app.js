@@ -53,7 +53,8 @@ async function refresh() {
   pill.classList.toggle("degraded", h.overall !== "healthy");
 
   // cards
-  setCard("apple",    statusToCardKind(h.apple.status),    "Apple",    h.apple.detail);
+  setCard("apple",    statusToCardKind(h.apple.status),    "Apple (AirTags)",   h.apple.detail);
+  setCard("icloud",   statusToCardKind(h.icloud.status),   "iCloud (devices)",  h.icloud.detail);
   setCard("mqtt",     statusToCardKind(h.mqtt.status),     "MQTT",     h.mqtt.detail);
   setCard("anisette", statusToCardKind(h.anisette.status), "Anisette", h.anisette.detail);
   setCard("bundle",   statusToCardKind(h.bundle.status),   "Bundle",   h.bundle.detail);
@@ -92,8 +93,10 @@ async function refresh() {
   // Setup sections — hide when each component is healthy
   $("#setup-bundle").hidden = h.bundle.status === "healthy";
   const appleHealthy = h.apple.status === "healthy";
-  const needs2fa = h.apple.status === "needs_2fa";
-  $("#setup-apple").hidden = appleHealthy || needs2fa;
+  const icloudHealthy = h.icloud.status === "healthy";
+  const bothLoggedIn = appleHealthy && icloudHealthy;
+  const needs2fa = h.apple.status === "needs_2fa" || h.icloud.status === "needs_2fa";
+  $("#setup-apple").hidden = bothLoggedIn || needs2fa;
   $("#setup-2fa").hidden = !needs2fa;
 
   // Pre-fill known fields

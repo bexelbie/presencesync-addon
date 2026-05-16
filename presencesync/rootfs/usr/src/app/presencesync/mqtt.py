@@ -11,6 +11,7 @@ import paho.mqtt.client as mqtt
 
 from . import state
 from .apple import LocationFix
+from .icloud import DeviceFix
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +99,27 @@ class MqttPublisher:
             log.warning("publish %s rc=%s payload_len=%d", topic, info.rc, len(payload))
         else:
             log.debug("publish %s ok (mid=%s)", topic, info.mid)
+
+    def publish_device_fix(self, d: DeviceFix) -> None:
+        """Family / owned-device location → MQTT. Same shape as publish_fix."""
+        if self._client is None or not self._connected.is_set():
+            return
+        # Reuse LocationFix-shaped publishing — DeviceFix has the same essential fields
+        as_fix = LocationFix(
+            identifier=d.identifier,
+            name=d.name,
+            model=d.model,
+            latitude=d.latitude,
+            longitude=d.longitude,
+            horizontal_accuracy=d.horizontal_accuracy,
+            timestamp_unix=d.timestamp_unix,
+        )
+        self.publish_fix(as_fix)
+        # Battery sensor for devices (level percentage when available)
+        if d.battery_level is not None:
+            cfg = state.get().mqtt
+            obj = f"presencesync_{_slug(d.name)}"
+            self._publish(f"{cfg.state_prefix}/{obj}/battery", str(int(d.battery_level * 100)))
 
     def publish_fix(self, fix: LocationFix) -> None:
         if self._client is None or not self._connected.is_set():
