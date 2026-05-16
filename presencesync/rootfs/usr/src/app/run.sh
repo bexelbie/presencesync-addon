@@ -14,7 +14,8 @@ fi
 
 export PRESENCESYNC_DATA_DIR=/data
 
-echo "[PresenceSync] starting"
+VERSION=$(cd /usr/src/app && python3 -c 'from presencesync import __version__; print(__version__)' 2>/dev/null || echo "?")
+echo "[PresenceSync] starting v${VERSION}"
 echo "  log_level    = ${PRESENCESYNC_LOG_LEVEL:-info}"
 echo "  poll         = ${PRESENCESYNC_POLL_INTERVAL:-60}s"
 echo "  anisette     = ${PRESENCESYNC_ANISETTE_URL:-(unset)}"

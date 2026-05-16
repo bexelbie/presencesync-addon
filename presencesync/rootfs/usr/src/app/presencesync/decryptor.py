@@ -55,17 +55,37 @@ def load_bundle(bundle_dir: Path) -> tuple[bytes, list[OwnedBeacon]]:
 
     # macOS tar pollutes bundles with AppleDouble sidecar files prefixed `._`
     # — those aren't real records, just resource-fork metadata. Skip them.
-    records = sorted(p for p in beacons_dir.glob("*.record") if not p.name.startswith("._"))
+    # Also filter by file size to drop anything obviously not a plist (sidecars
+    # are typically <500 bytes).
+    all_records = sorted(beacons_dir.glob("*.record"))
+    records = [
+        p for p in all_records
+        if not p.name.startswith("._")
+        and not p.name.startswith(".")
+    ]
+    skipped = [p.name for p in all_records if p not in records]
+    if skipped:
+        import logging
+        logging.getLogger(__name__).info("skipping %d AppleDouble sidecar(s): %s", len(skipped), skipped[:5])
     if not records:
         raise ValueError(
-            f"OwnedBeacons/ has no .record files. "
-            f"Contains: {[p.name for p in beacons_dir.iterdir()][:10]}"
+            f"OwnedBeacons/ has no real .record files (excluding ._ sidecars). "
+            f"All entries: {[p.name for p in beacons_dir.iterdir()][:10]}"
         )
 
     out: list[OwnedBeacon] = []
     for rec in records:
+        # Belt-and-suspenders: double-check the filename right before reading
+        if rec.name.startswith("._") or rec.name.startswith("."):
+            continue
         try:
             blob = rec.read_bytes()
+            # Final guard: AppleDouble magic is 00 05 16 07 — reject those even
+            # if they slipped through the name filter for any reason.
+            if blob[:4] == b"\x00\x05\x16\x07":
+                import logging
+                logging.getLogger(__name__).warning("skipping AppleDouble payload at %s", rec.name)
+                continue
             inner = decrypt_record(blob, key)
         except Exception as err:
             raise ValueError(
