@@ -7,6 +7,8 @@ import time
 
 from findmy import LoginState
 
+from pathlib import Path
+
 from . import state
 from .apple import AppleClient
 from .mqtt import MqttPublisher
@@ -34,6 +36,16 @@ class Coordinator:
             await self.apple.ensure_account()
         except Exception:
             log.exception("apple.ensure_account failed; will retry in poll loop")
+
+        # Auto-reload the bundle from /data/bundle/ if we have one on disk.
+        # /data persists across container restarts / updates, so a user who
+        # uploaded once doesn't need to upload again on every addon update.
+        if state.get().bundle_uploaded:
+            try:
+                self.apple.load_bundle(state.BUNDLE_DIR)
+            except Exception:
+                log.exception("Failed to auto-reload bundle from %s", state.BUNDLE_DIR)
+
         self._task = asyncio.create_task(self._run())
 
     async def _run(self):
