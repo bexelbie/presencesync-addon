@@ -1,15 +1,103 @@
-:root { color-scheme: light dark; font: 14px system-ui, sans-serif; }
+:root {
+  color-scheme: light dark;
+  font: 14px system-ui, sans-serif;
+  --ok: #10b981;
+  --warn: #f59e0b;
+  --err: #ef4444;
+  --line: color-mix(in oklch, currentColor 12%, transparent);
+  --bg-card: color-mix(in oklch, currentColor 5%, transparent);
+}
 * { box-sizing: border-box; }
-body { margin: 0; padding: 0; }
-header { padding: 1rem 1.5rem; display: flex; align-items: baseline; gap: 1rem; border-bottom: 1px solid color-mix(in oklch, currentColor 20%, transparent); }
-header h1 { margin: 0; font-size: 1.4rem; }
-.ver { opacity: 0.6; font-size: 0.85rem; }
-main { padding: 1.5rem; max-width: 720px; }
-section { padding: 1rem 0; border-bottom: 1px solid color-mix(in oklch, currentColor 10%, transparent); }
-h2 { margin: 0 0 0.75rem; font-size: 1.1rem; }
-label { display: block; margin: 0.4rem 0; }
-input { display: block; width: 100%; padding: 0.5rem; font: inherit; border: 1px solid color-mix(in oklch, currentColor 25%, transparent); border-radius: 4px; background: transparent; color: inherit; }
-button { padding: 0.5rem 1rem; font: inherit; border: 1px solid color-mix(in oklch, currentColor 25%, transparent); border-radius: 4px; background: transparent; color: inherit; cursor: pointer; margin-right: 0.4rem; margin-top: 0.5rem; }
-button:hover { background: color-mix(in oklch, currentColor 8%, transparent); }
-button.danger { color: #c0392b; }
-pre { white-space: pre-wrap; word-break: break-word; background: color-mix(in oklch, currentColor 5%, transparent); padding: 0.5rem; border-radius: 4px; font: 12px ui-monospace, monospace; }
+body { margin: 0; }
+header {
+  padding: 1rem 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  border-bottom: 1px solid var(--line);
+}
+header img { display: block; }
+header h1 { margin: 0; font-size: 1.4rem; flex: 0 0 auto; }
+.ver { opacity: 0.5; font-size: 0.75rem; }
+.pill {
+  margin-left: auto;
+  font-size: 0.8rem;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  background: var(--bg-card);
+}
+.pill.healthy { background: color-mix(in oklch, var(--ok) 18%, transparent); color: var(--ok); }
+.pill.degraded { background: color-mix(in oklch, var(--err) 18%, transparent); color: var(--err); }
+
+main { padding: 1.5rem; max-width: 880px; }
+section { margin-bottom: 2rem; }
+h2 { font-size: 1.05rem; margin: 0 0 0.75rem; }
+.muted { color: color-mix(in oklch, currentColor 55%, transparent); font-size: 0.85rem; margin: 0.4rem 0; }
+a { color: inherit; }
+
+/* Health cards */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem; }
+.card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+  background: var(--bg-card);
+}
+.card-h { font-weight: 600; font-size: 0.85rem; display: flex; align-items: center; gap: 0.5rem; }
+.card-h::before {
+  content: "•";
+  font-size: 1.5rem;
+  line-height: 0;
+  color: color-mix(in oklch, currentColor 30%, transparent);
+}
+.card.healthy .card-h::before { color: var(--ok); }
+.card.warn .card-h::before    { color: var(--warn); }
+.card.err .card-h::before     { color: var(--err); }
+.card-b { font-size: 0.8rem; opacity: 0.85; margin-top: 0.35rem; line-height: 1.4; }
+
+/* Items table */
+table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+th, td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--line); }
+th { font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.7; }
+td.state-home    { color: var(--ok); font-weight: 600; }
+td.state-away    { color: var(--warn); }
+td.state-unknown { opacity: 0.6; }
+
+/* Forms */
+label { display: block; margin: 0.6rem 0; }
+label input {
+  display: block; width: 100%; max-width: 360px;
+  padding: 0.5rem;
+  font: inherit;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  margin-top: 0.25rem;
+}
+button {
+  padding: 0.5rem 1rem;
+  font: inherit;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: color-mix(in oklch, currentColor 10%, transparent);
+  color: inherit;
+  cursor: pointer;
+  margin-top: 0.5rem;
+  margin-right: 0.4rem;
+}
+button:hover { background: color-mix(in oklch, currentColor 18%, transparent); }
+button.ghost { background: transparent; }
+
+pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg-card);
+  padding: 0.5rem;
+  border-radius: 4px;
+  font: 12px ui-monospace, monospace;
+}
+
+code { font: 0.85em ui-monospace, monospace; padding: 0.05em 0.3em; background: var(--bg-card); border-radius: 3px; }
+
+input[type="file"] { font: inherit; margin: 0.4rem 0; }

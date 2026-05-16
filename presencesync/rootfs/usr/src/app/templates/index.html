@@ -10,55 +10,57 @@
 </head>
 <body>
 <header>
-  <img src="static/logo.png" alt="PresenceSync" width="40" height="40"/>
+  <img src="static/logo.png" alt="" width="40" height="40"/>
   <h1>PresenceSync</h1>
   <span class="ver">v{{ version }}</span>
+  <span id="overall-pill" class="pill">checking…</span>
 </header>
+
 <main>
-  <section id="status">
-    <h2>Status</h2>
-    <pre id="status-out">Loading…</pre>
-    <button id="poll-now">Fetch from Apple now</button>
-    <button id="reset" class="danger">Reset</button>
+  <section id="health">
+    <div class="cards">
+      <div class="card" id="card-apple"><div class="card-h">Apple</div><div class="card-b">…</div></div>
+      <div class="card" id="card-mqtt"><div class="card-h">MQTT</div><div class="card-b">…</div></div>
+      <div class="card" id="card-anisette"><div class="card-h">Anisette</div><div class="card-b">…</div></div>
+      <div class="card" id="card-bundle"><div class="card-h">Bundle</div><div class="card-b">…</div></div>
+    </div>
+    <p class="muted" id="last-poll"></p>
   </section>
 
-  <section id="setup-auto">
-    <h2>1. MQTT broker &amp; home location</h2>
-    <p>Auto-detected from Home Assistant — your Mosquitto credentials and the lat/lon/radius from <code>zone.home</code>. No action needed unless these are wrong.</p>
-    <pre id="auto-out">discovering…</pre>
-    <button id="rediscover">Re-discover from HA</button>
+  <section id="items">
+    <h2>Tracked items <span class="muted" id="items-count"></span></h2>
+    <table id="items-table">
+      <thead><tr><th>Name</th><th>Model</th><th>State</th><th>Last seen</th><th>Accuracy</th></tr></thead>
+      <tbody id="items-tbody"></tbody>
+    </table>
+    <p class="muted" id="items-empty" hidden>No items have reported yet. Apple's network only relays when an iPhone passes near your AirTags — first fixes can take a few minutes.</p>
   </section>
 
-  <section id="setup-bundle">
-    <h2>2. Upload extractor bundle</h2>
-    <p>Run the PresenceSync extractor on your Mac to produce <code>presencesync-bundle.tar.gz</code>.
-       Upload it here. (One-time — keeps working until you sign out of iCloud.)</p>
+  <section id="setup-bundle" hidden>
+    <h2>1. Upload extractor bundle</h2>
+    <p class="muted">Run the PresenceSync extractor on a Mac signed in to your Apple ID to produce <code>presencesync-bundle.tar.gz</code>. <a href="https://github.com/PrayerfulDrop/presencesync-addon/blob/main/docs/mac-setup.md" target="_blank" rel="noreferrer">Full walkthrough →</a></p>
     <input type="file" id="bundle-file" accept=".tar,.tar.gz,.tgz"/>
     <button id="upload-bundle">Upload</button>
-    <pre id="bundle-out"></pre>
+    <pre id="bundle-out" hidden></pre>
   </section>
 
-  <section id="setup-apple">
-    <h2>3. Apple ID</h2>
-    <label>Apple ID <input id="apple-username" type="email"></label>
-    <label>Password <input id="apple-password" type="password"></label>
-    <label>
-      Anisette URL
-      <input id="apple-anisette" placeholder="auto-detected from sibling add-on">
-      <small>Leave blank to auto-detect. Override only if your HA Supervisor doesn't expose Anisette by hostname — e.g. set to <code>http://homeassistant.local:6969</code> if you've port-mapped Anisette to the host.</small>
-    </label>
+  <section id="setup-apple" hidden>
+    <h2>2. Apple login</h2>
+    <label>Apple ID <input id="apple-username" type="email" autocomplete="username"/></label>
+    <label>Password <input id="apple-password" type="password" autocomplete="current-password"/></label>
     <button id="apple-login">Log in</button>
-    <pre id="apple-out"></pre>
+    <p class="muted" id="apple-out"></p>
   </section>
 
   <section id="setup-2fa" hidden>
-    <h2>4. Two-factor code</h2>
-    <p>A 6-digit code was sent to your trusted Apple devices.</p>
-    <input id="apple-2fa-code" placeholder="123456" inputmode="numeric"/>
+    <h2>Two-factor code</h2>
+    <p class="muted">A 6-digit code was sent to your trusted Apple devices.</p>
+    <label>Code <input id="apple-2fa-code" placeholder="123456" inputmode="numeric" maxlength="6"/></label>
     <button id="apple-2fa-submit">Submit</button>
-    <button id="apple-2fa-request">Resend code</button>
+    <button class="ghost" id="apple-2fa-request">Resend code</button>
   </section>
 </main>
+
 <script src="static/app.js"></script>
 </body>
 </html>

@@ -231,6 +231,102 @@ async def status():
     }
 
 
+@app.get("/api/health")
+async def health():
+    """Structured health check for the UI dashboard."""
+    import aiohttp
+    import time as _time
+    coord = get_coord()
+    s = state.get()
+    login_state = str(coord.apple.last_login_state)
+
+    # Apple
+    if "LOGGED_IN" in login_state:
+        apple = {"status": "healthy",
+                 "detail": f"Logged in as {s.apple.username or '?'}"}
+    elif "REQUIRE_2FA" in login_state:
+        apple = {"status": "needs_2fa",
+                 "detail": "Apple sent a 6-digit code to your trusted devices — enter it below"}
+    elif not s.apple.username:
+        apple = {"status": "needs_login",
+                 "detail": "Apple ID not configured"}
+    else:
+        apple = {"status": "needs_login",
+                 "detail": f"Not logged in (state={login_state}). Sign in again."}
+
+    # MQTT
+    if coord.mqtt.connected:
+        mqtt_h = {"status": "healthy",
+                  "detail": f"Connected to {s.mqtt.host}:{s.mqtt.port}"}
+    else:
+        mqtt_h = {"status": "disconnected",
+                  "detail": f"Not connected to {s.mqtt.host}:{s.mqtt.port} — check broker credentials and that the Mosquitto add-on is running"}
+
+    # Anisette — probe the URL
+    anisette_url = s.apple.anisette_url
+    anisette = {"status": "unknown", "detail": "not tested"}
+    if anisette_url:
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=4)) as sess:
+                async with sess.get(anisette_url) as r:
+                    if r.status == 200:
+                        anisette = {"status": "healthy",
+                                    "detail": f"Reachable at {anisette_url}"}
+                    else:
+                        anisette = {"status": "unreachable",
+                                    "detail": f"{anisette_url} returned HTTP {r.status}"}
+        except Exception as err:
+            anisette = {"status": "unreachable",
+                        "detail": f"{anisette_url} not reachable: {type(err).__name__}. Make sure the PresenceSync Anisette add-on is installed and started."}
+    else:
+        anisette = {"status": "unreachable",
+                    "detail": "No anisette URL configured"}
+
+    # Bundle
+    n_acc = len(coord.apple.accessories)
+    if s.bundle_uploaded and n_acc:
+        bundle_h = {"status": "healthy",
+                    "detail": f"{n_acc} item(s) loaded"}
+    elif s.bundle_uploaded and not n_acc:
+        bundle_h = {"status": "needs_upload",
+                    "detail": "Bundle marked uploaded but no items loaded — re-upload the bundle"}
+    else:
+        bundle_h = {"status": "needs_upload",
+                    "detail": "Run the extractor on your Mac and upload presencesync-bundle.tar.gz"}
+
+    # Items (most recent state)
+    items = [
+        {
+            "identifier": f.identifier,
+            "name": f.name,
+            "model": f.model,
+            "latitude": f.latitude,
+            "longitude": f.longitude,
+            "horizontal_accuracy": f.horizontal_accuracy,
+            "timestamp_unix": f.timestamp_unix,
+        }
+        for f in coord.last_fixes
+    ]
+
+    # Overall summary
+    overall = "healthy" if all(
+        x["status"] == "healthy" for x in (apple, mqtt_h, anisette, bundle_h)
+    ) else "degraded"
+
+    return {
+        "overall": overall,
+        "now_unix": int(_time.time()),
+        "last_poll_unix": coord.last_run_unix,
+        "apple": apple,
+        "mqtt": mqtt_h,
+        "anisette": anisette,
+        "bundle": bundle_h,
+        "items": items,
+        "anisette_url": s.apple.anisette_url,
+        "apple_username": s.apple.username,
+    }
+
+
 @app.post("/api/mqtt")
 async def set_mqtt(body: dict):
     def m(s):
