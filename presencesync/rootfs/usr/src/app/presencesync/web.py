@@ -81,11 +81,17 @@ async def index(request: Request):
     # resolve to /api/hassio_ingress/<token>/... not the HA root.
     ingress_path = request.headers.get("X-Ingress-Path", "")
     base_href = ingress_path + "/" if ingress_path and not ingress_path.endswith("/") else (ingress_path or "./")
-    return TEMPLATES.TemplateResponse("index.html", {
-        "request": request,
-        "version": getattr(__import__("presencesync"), "__version__", "?"),
-        "base_href": base_href,
-    })
+    # Starlette ≥0.29 requires `request` as the first positional arg to
+    # TemplateResponse — passing it inside the context dict triggers a
+    # TypeError ("unhashable type: 'dict'") deep in jinja2's cache.
+    return TEMPLATES.TemplateResponse(
+        request,
+        "index.html",
+        {
+            "version": getattr(__import__("presencesync"), "__version__", "?"),
+            "base_href": base_href,
+        },
+    )
 
 
 @app.get("/api/ingress-debug")
