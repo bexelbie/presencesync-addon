@@ -449,47 +449,52 @@ async def apple_login(body: dict):
 
 @app.post("/api/apple/2fa/request")
 async def apple_request_2fa(body: dict):
-    """Trigger Apple to resend a 2FA code on both backends.
+    """Trigger Apple to resend a 2FA code — only where it's actually needed.
 
-    findmy.py: request_2fa on the pending method (if in REQUIRE_2FA state)
-    pyicloud:  re-initiate login to push a fresh code to trusted devices
+    Apple uses HSA2 (modern 2FA). Codes get pushed to all trusted devices when
+    a login enters the REQUIRE_2FA state. We must NOT spam re-login on a
+    backend that's already authenticated — Apple rate-limits aggressively
+    (503 / "Invalid email/password" follow).
+
+    Rules:
+      - findmy.py LOGGED_IN     → skip (nothing to resend)
+      - findmy.py REQUIRE_2FA   → call request_2fa on the pending method
+      - findmy.py LOGGED_OUT    → log a hint; the user should click Log in again
+      - pyicloud  logged_in     → skip
+      - pyicloud  needs_2fa     → Apple already pushed the code at login; no
+                                  resend possible without a fresh login. Tell
+                                  user the code is on their devices already.
+      - pyicloud  logged_out    → log a hint; user should click Log in again
     """
     coord = get_coord()
     method = int(body.get("method", 0))
-    s = state.get()
-    findmy_done = False
-    icloud_done = False
 
+    out = {"findmy": "skipped", "icloud": "skipped"}
     findmy_state = str(coord.apple.last_login_state)
-    if "REQUIRE_2FA" in findmy_state:
+    if "LOGGED_IN" in findmy_state:
+        out["findmy"] = "already_authenticated"
+    elif "REQUIRE_2FA" in findmy_state:
         try:
             await coord.apple.request_2fa(method)
-            findmy_done = True
+            out["findmy"] = "resent"
         except Exception as e:
             log.warning("findmy.py request_2fa failed: %s", e)
-    elif s.apple.username and s.apple.password:
-        # findmy isn't in 2FA state — re-run the login flow to get it there
-        try:
-            new_state = str(await coord.apple.login(s.apple.username, s.apple.password))
-            if "REQUIRE_2FA" in new_state:
-                await coord.apple.request_2fa(method)
-                findmy_done = True
-        except Exception as e:
-            log.warning("findmy.py re-login for resend failed: %s", e)
+            out["findmy"] = f"error: {e}"
+    else:
+        out["findmy"] = "not_logged_in; click Log in"
 
-    if s.apple.username and s.apple.password:
-        # pyicloud — calling login again pushes a fresh code
-        try:
-            new_state = await asyncio.get_event_loop().run_in_executor(
-                None, coord.icloud.login, s.apple.username, s.apple.password
-            )
-            icloud_done = new_state == "needs_2fa"
-        except Exception as e:
-            log.warning("pyicloud re-login for resend failed: %s", e)
+    ic_state = coord.icloud.login_state
+    if ic_state == "logged_in":
+        out["icloud"] = "already_authenticated"
+    elif ic_state == "needs_2fa":
+        # Apple already pushed a code at login. New resend would trigger a fresh
+        # login which Apple rate-limits — better to tell the user the code is
+        # already on their device.
+        out["icloud"] = "code_already_sent_at_login; check your trusted Apple devices"
+    else:
+        out["icloud"] = "not_logged_in; click Log in"
 
-    if not (findmy_done or icloud_done):
-        raise HTTPException(500, "Could not resend 2FA to either backend — check the log for details")
-    return {"findmy_resent": findmy_done, "icloud_resent": icloud_done}
+    return out
 
 
 @app.post("/api/apple/2fa/submit")
