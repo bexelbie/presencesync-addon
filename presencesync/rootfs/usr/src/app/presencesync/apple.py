@@ -49,33 +49,40 @@ class AppleClient:
         if not anisette_url:
             raise RuntimeError("anisette_url is not configured")
         self.anisette = RemoteAnisetteProvider(anisette_url)
-        # Try to resume from persisted state. We only attempt this if the saved
-        # blob looks like an AccountStateMapping — older versions wrote a partial
-        # shape that AsyncAppleAccount rejects with KeyError 'ids' and the close
-        # path also tries to use _closed which isn't set yet. Validate first.
+        # Try to resume from persisted state. findmy.AsyncAppleAccount in 0.10
+        # uses underscore-prefixed private fields (no AccountStateMapping export).
+        # We saved a filtered subset of __dict__; restore by setattr.
         saved = state.load_apple_state()
         if saved is None:
             log.info("apple_state: no saved state found — fresh account")
+        elif isinstance(saved, dict):
+            log.info("apple_state: loaded blob — top-level keys: %s", list(saved.keys()))
         else:
-            log.info("apple_state: loaded blob — top-level keys: %s",
-                     list(saved.keys()) if isinstance(saved, dict) else type(saved).__name__)
-        is_valid_saved = isinstance(saved, dict) and "ids" in saved and "account" in saved
-        if saved and not is_valid_saved:
-            log.warning("Saved Apple state is malformed; clearing")
+            log.warning("apple_state: loaded non-dict (%s); discarding", type(saved).__name__)
             state.clear_apple_state()
             saved = None
-        if saved:
-            try:
-                self.account = AsyncAppleAccount(anisette=self.anisette, state_info=saved)
-                self.last_login_state = self.account.login_state
-                log.info("Resumed Apple account from saved state: %s", self.last_login_state)
-                return
-            except Exception:
-                log.exception("Failed to resume saved Apple state; will require login again")
-                state.clear_apple_state()
-                self.account = None
-        if self.account is None:
-            self.account = AsyncAppleAccount(anisette=self.anisette)
+
+        # Always create a fresh AsyncAppleAccount bound to the current event loop;
+        # we'll then patch the saved attributes on top of it.
+        self.account = AsyncAppleAccount(anisette=self.anisette)
+
+        if isinstance(saved, dict):
+            # Only restore identity + auth state. Don't restore transient resources
+            # like _loop, _http, _closed, _reports, _anisette — those need to be
+            # rebuilt against the current event loop / aiohttp session.
+            RESTORABLE = {"_uid", "_devid", "_username", "_password",
+                          "_login_state", "_login_state_data", "_account_info"}
+            applied: list[str] = []
+            for k, v in saved.items():
+                if k in RESTORABLE:
+                    try:
+                        setattr(self.account, k, v)
+                        applied.append(k)
+                    except Exception:
+                        log.debug("apple_state: setattr %s failed", k)
+            self.last_login_state = self.account.login_state
+            log.info("Resumed Apple account — restored %d fields, login_state=%s",
+                     len(applied), self.last_login_state)
 
     async def login(self, username: str, password: str) -> LoginState:
         await self.ensure_account()
