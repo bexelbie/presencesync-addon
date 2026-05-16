@@ -203,7 +203,7 @@ async def status():
             "username": s.apple.username,
             "anisette_url": s.apple.anisette_url,
             "login_state": str(coord.apple.last_login_state),
-            "beacons_loaded": len(coord.apple.beacons),
+            "beacons_loaded": len(coord.apple.accessories),
         },
         "mqtt": {
             "host": s.mqtt.host,
@@ -369,8 +369,8 @@ async def upload_bundle(file: UploadFile):
     return {
         "ok": True,
         "beacons": [
-            {"identifier": b.identifier, "name": b.name, "model": b.model}
-            for b in coord.apple.beacons
+            (a.to_json() if hasattr(a, "to_json") else {"name": str(a)})
+            for a in coord.apple.accessories
         ],
     }
 
@@ -424,6 +424,6 @@ async def reset():
     await state.update(m)
     coord = get_coord()
     coord.apple.account = None
-    coord.apple.beacons = []
+    coord.apple.accessories = []
     coord.apple.beaconstore_key = None
     return {"ok": True}

@@ -9,12 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from findmy import AsyncAppleAccount, LoginState
+from findmy import AsyncAppleAccount, FindMyAccessory, LoginState
 from findmy.reports.anisette import RemoteAnisetteProvider
-from findmy import KeyPair, KeyPairType
+from findmy.plist import list_accessories
 
 from . import state
-from .decryptor import OwnedBeacon, load_bundle
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +35,7 @@ class AppleClient:
     def __init__(self):
         self.account: AsyncAppleAccount | None = None
         self.anisette: RemoteAnisetteProvider | None = None
-        self.beacons: list[OwnedBeacon] = []
+        self.accessories: list[FindMyAccessory] = []
         self.beaconstore_key: bytes | None = None
         self._pending_2fa: object | None = None  # AsyncTrustedDeviceSecondFactor or AsyncSmsSecondFactor
         self.last_login_state: LoginState = LoginState.LOGGED_OUT
@@ -93,28 +92,37 @@ class AppleClient:
         return result
 
     def load_bundle(self, bundle_dir: Path) -> None:
-        self.beaconstore_key, self.beacons = load_bundle(bundle_dir)
-        log.info("Loaded bundle: %d beacons", len(self.beacons))
+        """Decrypt BeaconStore.key and load all FindMyAccessory objects via findmy.plist.
+
+        AirTags use rolling keys (the advertised public key rotates ~every 15 min),
+        derived from a master key + shared secret. FindMyAccessory wraps that
+        rolling-key derivation; passing it to fetch_location lets findmy.py
+        figure out which historical keys to query Apple's gateway for.
+        """
+        bs_path = bundle_dir / "BeaconStore.key"
+        if not bs_path.exists():
+            raise FileNotFoundError(f"BeaconStore.key missing in {bundle_dir}")
+        self.beaconstore_key = bs_path.read_bytes()
+        if len(self.beaconstore_key) != 32:
+            raise ValueError(f"BeaconStore.key is {len(self.beaconstore_key)}B, expected 32")
+
+        # findmy expects the bundle to look like ~/Library/com.apple.icloud.searchpartyd/
+        # i.e. OwnedBeacons/, BeaconNamingRecord/, KeyAlignmentRecords/ at the root.
+        # Our bundle.tar.gz lays them out exactly that way.
+        self.accessories = list_accessories(key=self.beaconstore_key, search_path=bundle_dir)
+        log.info("Loaded bundle: %d accessories", len(self.accessories))
+        for a in self.accessories:
+            j = a.to_json() if hasattr(a, "to_json") else {}
+            log.info("  - %s (%s) %s", j.get("name") or "?", j.get("model") or "?", j.get("identifier") or "?")
 
     async def fetch_locations(self) -> list[LocationFix]:
         if self.account is None or self.last_login_state != LoginState.LOGGED_IN:
             return []
-        if not self.beacons:
+        if not self.accessories:
             return []
 
-        # Build KeyPair objects per beacon. Each beacon's private_key is the master key.
-        targets = []
-        beacons_by_pubkey: dict[str, OwnedBeacon] = {}
-        for b in self.beacons:
-            try:
-                kp = KeyPair(private_key=b.private_key, key_type=KeyPairType.PRIMARY, name=b.name or b.identifier)
-                targets.append(kp)
-                beacons_by_pubkey[kp.hashed_adv_key_b64] = b  # convenience
-            except Exception:
-                log.exception("Failed to build KeyPair for beacon %s", b.identifier)
-
         try:
-            reports = await self.account.fetch_location(targets)
+            reports = await self.account.fetch_location(self.accessories)
         except Exception:
             log.exception("fetch_location failed")
             return []
@@ -122,13 +130,13 @@ class AppleClient:
 
         out: list[LocationFix] = []
         if isinstance(reports, dict):
-            for kp, report in reports.items():
+            for acc, report in reports.items():
                 if report is None:
                     continue
-                beacon = beacons_by_pubkey.get(getattr(kp, "hashed_adv_key_b64", None), None)
-                ident = beacon.identifier if beacon else getattr(kp, "name", "unknown")
-                name = (beacon.name if beacon and beacon.name else getattr(kp, "name", None)) or ident
-                model = beacon.model if beacon else None
+                j = acc.to_json() if hasattr(acc, "to_json") else {}
+                ident = j.get("identifier") or getattr(acc, "name", "unknown")
+                name = j.get("name") or ident
+                model = j.get("model")
                 out.append(LocationFix(
                     identifier=ident,
                     name=name,
@@ -138,6 +146,19 @@ class AppleClient:
                     horizontal_accuracy=float(report.horizontal_accuracy),
                     timestamp_unix=int(report.timestamp.timestamp()),
                 ))
+        elif reports is not None:
+            # Single accessory case — wrap into a 1-element dict equivalent
+            j = self.accessories[0].to_json() if self.accessories else {}
+            out.append(LocationFix(
+                identifier=j.get("identifier", "?"),
+                name=j.get("name") or j.get("identifier", "?"),
+                model=j.get("model"),
+                latitude=float(reports.latitude),
+                longitude=float(reports.longitude),
+                horizontal_accuracy=float(reports.horizontal_accuracy),
+                timestamp_unix=int(reports.timestamp.timestamp()),
+            ))
+        log.info("fetch_locations got %d location reports", len(out))
         return out
 
     def _persist(self) -> None:
