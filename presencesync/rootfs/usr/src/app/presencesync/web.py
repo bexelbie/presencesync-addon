@@ -410,7 +410,21 @@ async def poll_now():
     fixes = await coord.apple.fetch_locations()
     for f in fixes:
         coord.mqtt.publish_fix(f)
-    return {"fixes": len(fixes)}
+    return {"fixes": len(fixes), "mqtt_connected": coord.mqtt.connected}
+
+
+@app.post("/api/mqtt-test")
+async def mqtt_test():
+    """Publish a heartbeat to confirm the broker is reachable + auth works."""
+    import time as _time
+    coord = get_coord()
+    if coord.mqtt._client is None:
+        return JSONResponse({"error": "no MQTT client"}, status_code=500)
+    topic = f"{state.get().mqtt.state_prefix}/mqtt-test"
+    payload = f"ping {_time.time()}"
+    info = coord.mqtt._client.publish(topic, payload, qos=1, retain=False)
+    return {"topic": topic, "payload": payload, "rc": info.rc, "mid": info.mid,
+            "connected": coord.mqtt.connected}
 
 
 @app.post("/api/reset")

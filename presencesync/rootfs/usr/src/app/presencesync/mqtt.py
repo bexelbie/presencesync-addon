@@ -72,8 +72,10 @@ class MqttPublisher:
         is_failure = getattr(reason_code, "is_failure", None)
         rc_int = getattr(reason_code, "value", reason_code)
         if (is_failure is False) or rc_int == 0:
-            log.info("MQTT connected")
-            client.publish(self._availability_topic, "online", qos=1, retain=True)
+            log.info("MQTT connected to %s:%s", self._cfg.host, self._cfg.port)
+            info = client.publish(self._availability_topic, "online", qos=1, retain=True)
+            log.info("publish %s='online' → rc=%s mid=%s",
+                     self._availability_topic, info.rc, info.mid)
             self._published_discovery.clear()  # re-publish discovery on reconnect
             self._connected.set()
             self._connect_failure_logged = False
@@ -86,8 +88,20 @@ class MqttPublisher:
         log.warning("MQTT disconnected reason=%s", reason_code)
         self._connected.clear()
 
+    def _publish(self, topic: str, payload: str, *, retain: bool = True) -> None:
+        if self._client is None:
+            log.debug("publish skipped: no client")
+            return
+        info = self._client.publish(topic, payload, qos=1, retain=retain)
+        if info.rc != mqtt.MQTT_ERR_SUCCESS:
+            log.warning("publish %s rc=%s payload_len=%d", topic, info.rc, len(payload))
+        else:
+            log.debug("publish %s ok (mid=%s)", topic, info.mid)
+
     def publish_fix(self, fix: LocationFix) -> None:
         if self._client is None or not self._connected.is_set():
+            log.warning("publish_fix(%s) skipped: client=%s connected=%s",
+                        fix.name, self._client is not None, self._connected.is_set())
             return
         cfg = state.get().mqtt
         home = state.get().home
@@ -108,8 +122,8 @@ class MqttPublisher:
             "model": fix.model or "",
             "source": "presencesync",
         }
-        self._client.publish(f"{cfg.state_prefix}/{obj}/state", state_val, qos=1, retain=True)
-        self._client.publish(f"{cfg.state_prefix}/{obj}/attributes", json.dumps(attrs), qos=1, retain=True)
+        self._publish(f"{cfg.state_prefix}/{obj}/state", state_val)
+        self._publish(f"{cfg.state_prefix}/{obj}/attributes", json.dumps(attrs))
 
     def _publish_discovery(self, obj: str, fix: LocationFix, cfg) -> None:
         device = {
@@ -131,9 +145,8 @@ class MqttPublisher:
             "device": device,
         }
         topic = f"{cfg.discovery_prefix}/device_tracker/{obj}/config"
-        assert self._client is not None
-        self._client.publish(topic, json.dumps(tracker_cfg), qos=1, retain=True)
-        log.info("Discovery published: %s", obj)
+        self._publish(topic, json.dumps(tracker_cfg))
+        log.info("Discovery published: %s → %s", obj, topic)
 
     def stop(self) -> None:
         if self._client is None:
