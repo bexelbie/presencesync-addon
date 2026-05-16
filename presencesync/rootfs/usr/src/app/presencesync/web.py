@@ -449,13 +449,47 @@ async def apple_login(body: dict):
 
 @app.post("/api/apple/2fa/request")
 async def apple_request_2fa(body: dict):
+    """Trigger Apple to resend a 2FA code on both backends.
+
+    findmy.py: request_2fa on the pending method (if in REQUIRE_2FA state)
+    pyicloud:  re-initiate login to push a fresh code to trusted devices
+    """
     coord = get_coord()
     method = int(body.get("method", 0))
-    try:
-        await coord.apple.request_2fa(method)
-    except Exception as e:
-        raise HTTPException(500, f"{type(e).__name__}: {e}")
-    return {"ok": True}
+    s = state.get()
+    findmy_done = False
+    icloud_done = False
+
+    findmy_state = str(coord.apple.last_login_state)
+    if "REQUIRE_2FA" in findmy_state:
+        try:
+            await coord.apple.request_2fa(method)
+            findmy_done = True
+        except Exception as e:
+            log.warning("findmy.py request_2fa failed: %s", e)
+    elif s.apple.username and s.apple.password:
+        # findmy isn't in 2FA state — re-run the login flow to get it there
+        try:
+            new_state = str(await coord.apple.login(s.apple.username, s.apple.password))
+            if "REQUIRE_2FA" in new_state:
+                await coord.apple.request_2fa(method)
+                findmy_done = True
+        except Exception as e:
+            log.warning("findmy.py re-login for resend failed: %s", e)
+
+    if s.apple.username and s.apple.password:
+        # pyicloud — calling login again pushes a fresh code
+        try:
+            new_state = await asyncio.get_event_loop().run_in_executor(
+                None, coord.icloud.login, s.apple.username, s.apple.password
+            )
+            icloud_done = new_state == "needs_2fa"
+        except Exception as e:
+            log.warning("pyicloud re-login for resend failed: %s", e)
+
+    if not (findmy_done or icloud_done):
+        raise HTTPException(500, "Could not resend 2FA to either backend — check the log for details")
+    return {"findmy_resent": findmy_done, "icloud_resent": icloud_done}
 
 
 @app.post("/api/apple/2fa/submit")
