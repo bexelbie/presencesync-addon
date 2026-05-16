@@ -28,10 +28,15 @@ TEMPLATES = Jinja2Templates(directory=str(APP_DIR / "templates"))
 
 
 async def _auto_configure() -> None:
-    """Fill in MQTT broker + home location from HA's Supervisor APIs on first run."""
+    """Fill in MQTT broker + home location + anisette URL from HA's Supervisor APIs."""
     s = state.get()
 
-    if not s.apple.anisette_url:
+    # Always re-discover anisette URL — the sibling add-on's hostname is HA-generated
+    # and the user shouldn't need to know it.
+    discovered_anisette = await supervisor.discover_anisette_url()
+    if discovered_anisette:
+        await state.update(lambda x: setattr(x.apple, "anisette_url", discovered_anisette))
+    elif not s.apple.anisette_url:
         await state.update(lambda x: setattr(x.apple, "anisette_url",
                                              os.environ.get("PRESENCESYNC_ANISETTE_URL", "")))
     if not s.mqtt.discovery_prefix:
@@ -320,10 +325,10 @@ async def upload_bundle(file: UploadFile):
 
 @app.post("/api/rediscover")
 async def rediscover():
-    """Re-pull MQTT + home location from HA. Overwrites whatever's in state."""
-    s = state.get()
+    """Re-pull MQTT + home location + anisette URL from HA Supervisor."""
     mqtt_info = await supervisor.discover_mqtt()
     home_info = await supervisor.discover_home()
+    anisette_url = await supervisor.discover_anisette_url()
     def m(x):
         if mqtt_info:
             x.mqtt.host = mqtt_info.host
@@ -334,12 +339,16 @@ async def rediscover():
             x.home.latitude = home_info.latitude
             x.home.longitude = home_info.longitude
             x.home.radius_m = int(home_info.radius_m)
+        if anisette_url:
+            x.apple.anisette_url = anisette_url
     await state.update(m)
     if mqtt_info:
         await get_coord().reload_mqtt()
+    s = state.get()
     return {
         "mqtt": {"host": s.mqtt.host, "port": s.mqtt.port, "username": s.mqtt.username} if mqtt_info else None,
         "home": {"latitude": s.home.latitude, "longitude": s.home.longitude, "radius_m": s.home.radius_m} if home_info else None,
+        "anisette_url": s.apple.anisette_url if anisette_url else None,
     }
 
 

@@ -68,6 +68,37 @@ async def discover_mqtt() -> MqttInfo | None:
         return None
 
 
+async def discover_anisette_url(port: int = 6969) -> str | None:
+    """Find the sibling anisette add-on's hostname via the Supervisor API.
+
+    HA Supervisor assigns container hostnames as `<repo-hash>_<slug>` which
+    we don't know at build-time. /addons returns the list with the actual
+    hostname for each installed add-on.
+    """
+    if not TOKEN:
+        return None
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+            async with s.get(f"{SUPERVISOR_BASE}/addons", headers=_headers()) as r:
+                if r.status != 200:
+                    return None
+                payload = await r.json()
+        addons = (payload.get("data") or {}).get("addons") or []
+        # Look for a sibling addon with slug ending in "anisette" or matching name
+        for a in addons:
+            slug = a.get("slug", "")
+            name = a.get("name", "")
+            if slug.endswith("_anisette") or slug == "anisette" or "anisette" in name.lower():
+                hostname = a.get("hostname") or slug
+                url = f"http://{hostname}:{port}"
+                log.info("found anisette add-on: slug=%s hostname=%s → %s", slug, hostname, url)
+                return url
+        log.warning("no anisette add-on found among %d installed", len(addons))
+    except Exception:
+        log.exception("anisette discovery failed")
+    return None
+
+
 async def discover_home() -> HomeInfo | None:
     """Pull latitude/longitude from HA core config + radius from zone.home."""
     if not TOKEN:
