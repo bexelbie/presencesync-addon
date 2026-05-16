@@ -54,6 +54,11 @@ class AppleClient:
         # shape that AsyncAppleAccount rejects with KeyError 'ids' and the close
         # path also tries to use _closed which isn't set yet. Validate first.
         saved = state.load_apple_state()
+        if saved is None:
+            log.info("apple_state: no saved state found — fresh account")
+        else:
+            log.info("apple_state: loaded blob — top-level keys: %s",
+                     list(saved.keys()) if isinstance(saved, dict) else type(saved).__name__)
         is_valid_saved = isinstance(saved, dict) and "ids" in saved and "account" in saved
         if saved and not is_valid_saved:
             log.warning("Saved Apple state is malformed; clearing")
@@ -215,6 +220,9 @@ class AppleClient:
         try:
             getstate = getattr(self.account, "__getstate__", None)
             if callable(getstate):
-                state.save_apple_state(getstate())
+                blob = getstate()
+                state.save_apple_state(blob)
+                log.debug("apple_state: persisted %d top-level keys",
+                          len(blob) if isinstance(blob, dict) else 0)
         except Exception:
-            log.debug("Could not persist Apple state", exc_info=True)
+            log.warning("Could not persist Apple state", exc_info=True)
