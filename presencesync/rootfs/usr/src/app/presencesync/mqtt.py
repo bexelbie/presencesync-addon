@@ -67,7 +67,11 @@ class MqttPublisher:
         return self._connected.is_set()
 
     def _on_connect(self, client, _userdata, _flags, reason_code, _props):
-        if int(reason_code) == 0:
+        # paho-mqtt 2.x passes a ReasonCode object — int() raises, must use
+        # .value (success == 0) or .is_failure.
+        is_failure = getattr(reason_code, "is_failure", None)
+        rc_int = getattr(reason_code, "value", reason_code)
+        if (is_failure is False) or rc_int == 0:
             log.info("MQTT connected")
             client.publish(self._availability_topic, "online", qos=1, retain=True)
             self._published_discovery.clear()  # re-publish discovery on reconnect

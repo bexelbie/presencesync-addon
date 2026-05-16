@@ -5,6 +5,7 @@ import logging
 import os
 import tarfile
 import tempfile
+import re
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -46,7 +47,29 @@ async def lifespan(_app: FastAPI):
     await coord.stop()
 
 
+class CollapseSlashesMiddleware:
+    """Normalize doubled-up slashes in the request path before routing.
+
+    HA's panel-mode Ingress sometimes forwards requests with a leading '//'
+    (the result of stripping the slug prefix but leaving its trailing slash).
+    FastAPI/Starlette routes match exact paths and don't equate '//' to '/',
+    so we collapse runs of slashes here.
+    """
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            new_path = re.sub(r"/{2,}", "/", scope.get("path", "")) or "/"
+            if new_path != scope.get("path"):
+                scope = dict(scope)
+                scope["path"] = new_path
+                scope["raw_path"] = new_path.encode("utf-8")
+        await self.app(scope, receive, send)
+
+
 app = FastAPI(title="PresenceSync", lifespan=lifespan)
+app.add_middleware(CollapseSlashesMiddleware)
 app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
 
 
