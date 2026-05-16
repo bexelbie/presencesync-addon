@@ -31,9 +31,14 @@ async def _auto_configure() -> None:
     """Fill in MQTT broker + home location + anisette URL from HA's Supervisor APIs."""
     s = state.get()
 
+    log.info("auto-configure starting; SUPERVISOR_TOKEN present=%s",
+             bool(os.environ.get("SUPERVISOR_TOKEN")))
+
     # Always re-discover anisette URL — the sibling add-on's hostname is HA-generated
     # and the user shouldn't need to know it.
     discovered_anisette = await supervisor.discover_anisette_url()
+    log.info("auto-configure: anisette discovery returned %s (prev=%s)",
+             discovered_anisette, s.apple.anisette_url)
     if discovered_anisette:
         await state.update(lambda x: setattr(x.apple, "anisette_url", discovered_anisette))
     elif not s.apple.anisette_url:
@@ -126,6 +131,39 @@ async def index(request: Request):
             "base_href": base_href,
         },
     )
+
+
+@app.get("/api/supervisor-debug")
+async def supervisor_debug():
+    """Dump what Supervisor tells us — for diagnosing addon discovery."""
+    import aiohttp
+    token = os.environ.get("SUPERVISOR_TOKEN", "")
+    headers = {"Authorization": f"Bearer {token}"}
+    out = {"token_present": bool(token), "addons": None, "info": None, "error": None}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+            async with s.get("http://supervisor/addons", headers=headers) as r:
+                out["addons_status"] = r.status
+                try:
+                    payload = await r.json()
+                    addons = (payload.get("data") or {}).get("addons") or []
+                    out["addons"] = [
+                        {"slug": a.get("slug"), "name": a.get("name"),
+                         "hostname": a.get("hostname"), "state": a.get("state"),
+                         "version": a.get("version")}
+                        for a in addons
+                    ]
+                except Exception:
+                    out["addons"] = await r.text()
+            async with s.get("http://supervisor/info", headers=headers) as r:
+                out["info_status"] = r.status
+                try:
+                    out["info"] = await r.json()
+                except Exception:
+                    out["info"] = await r.text()
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+    return out
 
 
 @app.get("/api/ingress-debug")
