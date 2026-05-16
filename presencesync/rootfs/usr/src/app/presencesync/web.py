@@ -413,11 +413,25 @@ async def apple_login(body: dict):
     state.clear_apple_state()
     await coord.apple.ensure_account()
     findmy_state = "ERROR"
-    try:
-        findmy_state = str(await coord.apple.login(username, password))
-    except Exception as e:
-        log.exception("findmy.py login raised")
-        findmy_state = f"ERROR: {type(e).__name__}: {e}"
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            findmy_state = str(await coord.apple.login(username, password))
+            last_err = None
+            break
+        except (asyncio.TimeoutError, TimeoutError) as e:
+            last_err = e
+            log.warning("findmy.py login timed out (attempt %d/3) — retrying", attempt + 1)
+            # Reset and try again — Apple's gateway is occasionally slow on the
+            # mobileme handshake; same credentials usually work on the 2nd try.
+            coord.apple.account = None
+            await coord.apple.ensure_account()
+        except Exception as e:
+            last_err = e
+            log.exception("findmy.py login raised (attempt %d/3)", attempt + 1)
+            break
+    if last_err and findmy_state == "ERROR":
+        findmy_state = f"ERROR: {type(last_err).__name__}: {last_err}"
 
     # ─── pyicloud login (family + owned Apple devices) ───────────────────
     icloud_state = "ERROR"
@@ -446,19 +460,33 @@ async def apple_request_2fa(body: dict):
 
 @app.post("/api/apple/2fa/submit")
 async def apple_submit_2fa(body: dict):
-    """Submit the 2FA code to BOTH findmy.py and pyicloud (same code works)."""
+    """Submit the 2FA code to BOTH backends (same code typically works for both).
+
+    Handles the case where one backend's login timed out before reaching
+    REQUIRE_2FA — retries that backend's login first, then submits the code.
+    """
     code = body.get("code") or ""
     if not code:
         raise HTTPException(400, "code required")
     coord = get_coord()
+    s = state.get()
 
-    # findmy.py
-    findmy_state = "ERROR"
-    try:
-        findmy_state = str(await coord.apple.submit_2fa(code))
-    except Exception as e:
-        log.warning("findmy.py 2FA submit failed: %s", e)
-        findmy_state = f"ERROR: {type(e).__name__}: {e}"
+    # findmy.py — submit if it's in 2FA state, otherwise try to re-login first
+    findmy_state = str(coord.apple.last_login_state)
+    if "REQUIRE_2FA" not in findmy_state and "LOGGED_IN" not in findmy_state:
+        log.info("findmy.py not in 2FA state (was %s) — retrying login before 2FA submit",
+                 findmy_state)
+        try:
+            findmy_state = str(await coord.apple.login(s.apple.username, s.apple.password))
+        except Exception as e:
+            log.warning("findmy.py re-login failed: %s", e)
+            findmy_state = f"ERROR: {type(e).__name__}: {e}"
+    if "REQUIRE_2FA" in findmy_state:
+        try:
+            findmy_state = str(await coord.apple.submit_2fa(code))
+        except Exception as e:
+            log.warning("findmy.py 2FA submit failed: %s", e)
+            findmy_state = f"ERROR: {type(e).__name__}: {e}"
 
     # pyicloud
     icloud_state = coord.icloud.login_state
