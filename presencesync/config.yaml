@@ -1,5 +1,5 @@
 name: PresenceSync
-version: "0.1.5"
+version: "0.1.6"
 slug: presencesync
 description: Track Apple AirTags, AirPods, iPhones, iPads, Macs, and Apple Watches in Home Assistant. One-time setup via web UI — no MQTT bridge running on your Mac, no SSH keys, no YAML.
 arch:
@@ -9,7 +9,10 @@ arch:
 url: https://github.com/PrayerfulDrop/presencesync-addon
 init: false
 hassio_api: true
-homeassistant_api: false
+homeassistant_api: true
+auth_api: true
+services:
+  - mqtt:want
 host_network: false
 ingress: true
 ingress_port: 8099

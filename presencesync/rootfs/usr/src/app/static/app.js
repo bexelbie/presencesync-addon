@@ -23,15 +23,11 @@ async function refreshStatus() {
   try {
     const s = await api("/api/status");
     $("#status-out").textContent = JSON.stringify(s, null, 2);
-    if (s.mqtt) {
-      if (!$("#mqtt-host").value) $("#mqtt-host").value = s.mqtt.host;
-      if (!$("#mqtt-port").value || $("#mqtt-port").value === "1883") $("#mqtt-port").value = s.mqtt.port;
-    }
-    if (s.home && s.home.latitude) {
-      $("#home-lat").value = s.home.latitude;
-      $("#home-lon").value = s.home.longitude;
-      $("#home-radius").value = s.home.radius_m;
-    }
+    const auto = {
+      mqtt: { host: s.mqtt.host, port: s.mqtt.port, username: s.mqtt.username, connected: s.mqtt.connected },
+      home: s.home,
+    };
+    $("#auto-out").textContent = JSON.stringify(auto, null, 2);
     if (s.apple && s.apple.anisette_url) $("#apple-anisette").value = s.apple.anisette_url;
     if (s.apple && s.apple.username) $("#apple-username").value = s.apple.username;
     if (s.apple && s.apple.login_state === "LoginState.REQUIRE_2FA") $("#setup-2fa").hidden = false;
@@ -40,22 +36,13 @@ async function refreshStatus() {
   }
 }
 
-$("#save-mqtt").onclick = async () => {
-  await api("/api/mqtt", { method: "POST", body: {
-    host: $("#mqtt-host").value,
-    port: parseInt($("#mqtt-port").value, 10),
-    username: $("#mqtt-username").value,
-    password: $("#mqtt-password").value,
-  }});
-  refreshStatus();
-};
-
-$("#save-home").onclick = async () => {
-  await api("/api/home", { method: "POST", body: {
-    latitude: parseFloat($("#home-lat").value),
-    longitude: parseFloat($("#home-lon").value),
-    radius_m: parseInt($("#home-radius").value, 10),
-  }});
+$("#rediscover").onclick = async () => {
+  try {
+    const r = await api("api/rediscover", { method: "POST" });
+    $("#auto-out").textContent = JSON.stringify(r, null, 2);
+  } catch (e) {
+    $("#auto-out").textContent = "rediscover error: " + e.message;
+  }
   refreshStatus();
 };
 

@@ -22,25 +22,15 @@
     <button id="reset" class="danger">Reset</button>
   </section>
 
-  <section id="setup-mqtt">
-    <h2>1. MQTT broker</h2>
-    <label>Host <input id="mqtt-host" value="core-mosquitto"></label>
-    <label>Port <input id="mqtt-port" type="number" value="1883"></label>
-    <label>Username <input id="mqtt-username"></label>
-    <label>Password <input id="mqtt-password" type="password"></label>
-    <button id="save-mqtt">Save MQTT</button>
-  </section>
-
-  <section id="setup-home">
-    <h2>2. Home location</h2>
-    <label>Latitude <input id="home-lat" type="number" step="0.000001"></label>
-    <label>Longitude <input id="home-lon" type="number" step="0.000001"></label>
-    <label>Radius (m) <input id="home-radius" type="number" value="100"></label>
-    <button id="save-home">Save home</button>
+  <section id="setup-auto">
+    <h2>1. MQTT broker &amp; home location</h2>
+    <p>Auto-detected from Home Assistant — your Mosquitto credentials and the lat/lon/radius from <code>zone.home</code>. No action needed unless these are wrong.</p>
+    <pre id="auto-out">discovering…</pre>
+    <button id="rediscover">Re-discover from HA</button>
   </section>
 
   <section id="setup-bundle">
-    <h2>3. Upload extractor bundle</h2>
+    <h2>2. Upload extractor bundle</h2>
     <p>Run the PresenceSync extractor on your Mac to produce <code>presencesync-bundle.tar.gz</code>.
        Upload it here. (One-time — keeps working until you sign out of iCloud.)</p>
     <input type="file" id="bundle-file" accept=".tar,.tar.gz,.tgz"/>
@@ -49,7 +39,7 @@
   </section>
 
   <section id="setup-apple">
-    <h2>4. Apple ID</h2>
+    <h2>3. Apple ID</h2>
     <label>Apple ID <input id="apple-username" type="email"></label>
     <label>Password <input id="apple-password" type="password"></label>
     <label>Anisette URL <input id="apple-anisette" placeholder="http://b1c3d05c-anisette:6969"></label>
@@ -58,7 +48,7 @@
   </section>
 
   <section id="setup-2fa" hidden>
-    <h2>5. Two-factor code</h2>
+    <h2>4. Two-factor code</h2>
     <p>A 6-digit code was sent to your trusted Apple devices.</p>
     <input id="apple-2fa-code" placeholder="123456" inputmode="numeric"/>
     <button id="apple-2fa-submit">Submit</button>

@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from findmy import LoginState
 
-from . import state
+from . import state, supervisor
 from .coordinator import get as get_coord
 
 log = logging.getLogger("presencesync")
@@ -27,11 +27,10 @@ APP_DIR = Path(__file__).resolve().parent.parent
 TEMPLATES = Jinja2Templates(directory=str(APP_DIR / "templates"))
 
 
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
-    coord = get_coord()
-    # If anisette URL isn't set in state, default to environment
+async def _auto_configure() -> None:
+    """Fill in MQTT broker + home location from HA's Supervisor APIs on first run."""
     s = state.get()
+
     if not s.apple.anisette_url:
         await state.update(lambda x: setattr(x.apple, "anisette_url",
                                              os.environ.get("PRESENCESYNC_ANISETTE_URL", "")))
@@ -41,6 +40,36 @@ async def lifespan(_app: FastAPI):
     if not s.mqtt.state_prefix:
         await state.update(lambda x: setattr(x.mqtt, "state_prefix",
                                              os.environ.get("PRESENCESYNC_STATE_PREFIX", "presencesync")))
+
+    # Always re-discover MQTT creds from Supervisor — these can rotate when the
+    # user re-installs Mosquitto, and they're not user-facing config anyway.
+    mqtt_info = await supervisor.discover_mqtt()
+    if mqtt_info:
+        log.info("auto-discovered MQTT: %s:%s (user=%s)", mqtt_info.host, mqtt_info.port, mqtt_info.username or "(anon)")
+        def m(x):
+            x.mqtt.host = mqtt_info.host
+            x.mqtt.port = mqtt_info.port
+            x.mqtt.username = mqtt_info.username
+            x.mqtt.password = mqtt_info.password
+        await state.update(m)
+
+    # Pull lat/lon/radius from HA core only if the user hasn't set their own yet
+    if not s.home.latitude:
+        home_info = await supervisor.discover_home()
+        if home_info:
+            log.info("auto-discovered home: %s, %s r=%sm (%s)",
+                     home_info.latitude, home_info.longitude, home_info.radius_m, home_info.location_name)
+            def m(x):
+                x.home.latitude = home_info.latitude
+                x.home.longitude = home_info.longitude
+                x.home.radius_m = int(home_info.radius_m)
+            await state.update(m)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    coord = get_coord()
+    await _auto_configure()
     await coord.start()
     log.info("PresenceSync web ready")
     yield
@@ -286,6 +315,31 @@ async def upload_bundle(file: UploadFile):
             {"identifier": b.identifier, "name": b.name, "model": b.model}
             for b in coord.apple.beacons
         ],
+    }
+
+
+@app.post("/api/rediscover")
+async def rediscover():
+    """Re-pull MQTT + home location from HA. Overwrites whatever's in state."""
+    s = state.get()
+    mqtt_info = await supervisor.discover_mqtt()
+    home_info = await supervisor.discover_home()
+    def m(x):
+        if mqtt_info:
+            x.mqtt.host = mqtt_info.host
+            x.mqtt.port = mqtt_info.port
+            x.mqtt.username = mqtt_info.username
+            x.mqtt.password = mqtt_info.password
+        if home_info:
+            x.home.latitude = home_info.latitude
+            x.home.longitude = home_info.longitude
+            x.home.radius_m = int(home_info.radius_m)
+    await state.update(m)
+    if mqtt_info:
+        await get_coord().reload_mqtt()
+    return {
+        "mqtt": {"host": s.mqtt.host, "port": s.mqtt.port, "username": s.mqtt.username} if mqtt_info else None,
+        "home": {"latitude": s.home.latitude, "longitude": s.home.longitude, "radius_m": s.home.radius_m} if home_info else None,
     }
 
 
