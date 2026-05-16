@@ -68,13 +68,20 @@ async function refresh() {
   tbody.innerHTML = "";
   for (const item of h.items) {
     const tr = document.createElement("tr");
-    // home/away — server-side state isn't included here; we'd need to mirror
-    // the haversine. Keep "—" for now; HA's zone resolver shows the real state.
     const seen = relTime(item.timestamp_unix);
+    const stateCls = item.state === "home" ? "state-home"
+                   : item.state === "away" ? "state-away"
+                   : "state-unknown";
+    const stateLabel = item.state === "home" ? "home"
+                     : item.state === "away" ? "away"
+                     : "—";
+    const dist = item.distance_from_home_m != null
+      ? ` <span class="muted">(${Math.round(item.distance_from_home_m)}m)</span>`
+      : "";
     tr.innerHTML = `
       <td>${escape(item.name || "?")}</td>
       <td class="muted">${escape(item.model || "—")}</td>
-      <td class="state-unknown">—</td>
+      <td class="${stateCls}">${stateLabel}${dist}</td>
       <td>${seen}</td>
       <td>±${Math.round(item.horizontal_accuracy)}m</td>`;
     tbody.appendChild(tr);

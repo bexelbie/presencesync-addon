@@ -294,9 +294,26 @@ async def health():
         bundle_h = {"status": "needs_upload",
                     "detail": "Run the extractor on your Mac and upload presencesync-bundle.tar.gz"}
 
-    # Items (most recent state)
-    items = [
-        {
+    # Items (most recent state) — include the home/away resolution so the
+    # dashboard can show it without re-implementing haversine in JS.
+    import math
+    def _haversine_m(lat1, lon1, lat2, lon2):
+        r = 6371000.0
+        p1, p2 = math.radians(lat1), math.radians(lat2)
+        dp = math.radians(lat2 - lat1)
+        dl = math.radians(lon2 - lon1)
+        a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+        return 2 * r * math.asin(math.sqrt(a))
+
+    items = []
+    for f in coord.last_fixes:
+        if s.home.latitude:
+            dist = _haversine_m(f.latitude, f.longitude, s.home.latitude, s.home.longitude)
+            state_val = "home" if dist <= s.home.radius_m else "away"
+        else:
+            dist = None
+            state_val = "unknown"
+        items.append({
             "identifier": f.identifier,
             "name": f.name,
             "model": f.model,
@@ -304,9 +321,9 @@ async def health():
             "longitude": f.longitude,
             "horizontal_accuracy": f.horizontal_accuracy,
             "timestamp_unix": f.timestamp_unix,
-        }
-        for f in coord.last_fixes
-    ]
+            "state": state_val,
+            "distance_from_home_m": dist,
+        })
 
     # Overall summary
     overall = "healthy" if all(
