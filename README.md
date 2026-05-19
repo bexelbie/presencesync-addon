@@ -179,6 +179,12 @@ Defaults are usually right. The MQTT broker, home location, and Apple credential
 - For the **AirTags** source: one Mac (Apple Silicon **or** Intel) for the one-time key extraction — SIP + AMFI temporarily disabled, then re-enabled after
 - For the **iDevices** source: just your Apple ID + a trusted Apple device for 2FA. No Mac required.
 - Both sources are independently toggleable; you can run AirTags only, iDevices only, or both.
+- this is an unofficial Apple API workaround
+- the extractor is a high-trust operation
+- the bundle should be treated like a password/location credential
+- HA backups may contain sensitive state
+- users should re-enable SIP/AMFI and delete temporary files after extraction
+- use at your own risk / inspect the code if concerned
 
 ## Licensing
 
