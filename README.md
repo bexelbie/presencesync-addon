@@ -193,11 +193,11 @@ Defaults are usually right. The MQTT broker, home location, and Apple credential
 - This repository's wrapper code: **MIT**
 - `anisette-v3-server`: **GPL-3.0** ([Dadoum/anisette-v3-server](https://github.com/Dadoum/anisette-v3-server))
 - `findmy.py`: **MIT** ([malmeloo/FindMy.py](https://github.com/malmeloo/FindMy.py))
-- `pyicloud`: **MIT** ([picklepete/pyicloud](https://github.com/picklepete/pyicloud))
+- `pyicloud`: **MIT** ([timlaing/pyicloud](https://github.com/timlaing/pyicloud))
 
 ## Acknowledgements
 
 - [`findmy-key-extractor`](https://github.com/manonstreet/findmy-key-extractor) by manonstreet — the original ARM64 extractor; we extended it to Intel + BeaconStore in [our fork](https://github.com/PrayerfulDrop/findmy-key-extractor).
 - [`FindMy.py`](https://github.com/malmeloo/FindMy.py) by malmeloo — the Apple Find My protocol client our AirTag path drives.
 - [iCloud3](https://github.com/gcobb321/icloud3) by gcobb321 (and contributors, especially `@COsm0cats`) — they discovered the IPv4-only-DNS workaround that made HSA2 2FA reliable again after Apple's iOS 2026.4 changes. We adopted the same fix.
-- [`pyicloud`](https://github.com/picklepete/pyicloud) by picklepete — the iCloud client library our iDevices path uses.
+- [`pyicloud`](https://github.com/timlaing/pyicloud) by Tim Laing — the actively maintained iCloud client library our iDevices path uses (fork of picklepete/pyicloud).
