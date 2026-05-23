@@ -194,3 +194,39 @@ class ICloudClient:
             log.exception("pyicloud devices fetch failed")
         log.info("pyicloud devices: %d with location", len(out))
         return out
+
+    def list_devices_brief(self) -> list[dict]:
+        """List all devices with their IDs and names (for API exposure)."""
+        if self._api is None or self.login_state != "logged_in":
+            return []
+        out = []
+        try:
+            for dev in self._api.devices:
+                data = dev.data if hasattr(dev, "data") else {}
+                out.append({
+                    "id": data.get("id") or data.get("deviceDiscoveryId") or "?",
+                    "name": data.get("name") or "?",
+                    "model": data.get("deviceDisplayName") or data.get("rawDeviceModel"),
+                    "device_class": data.get("deviceClass"),
+                    "sound_available": getattr(dev, "sound_available", True),
+                })
+        except Exception:
+            log.exception("pyicloud list_devices_brief failed")
+        return out
+
+    def play_sound(self, device_id: str, subject: str = "Find My iPhone Alert") -> bool:
+        """Trigger Find My alert sound on a device. Returns True if successful."""
+        if self._api is None or self.login_state != "logged_in":
+            return False
+        try:
+            for dev in self._api.devices:
+                data = dev.data if hasattr(dev, "data") else {}
+                dev_id = data.get("id") or data.get("deviceDiscoveryId")
+                if dev_id == device_id:
+                    dev.play_sound(subject=subject)
+                    log.info("play_sound triggered on device %s (%s)",
+                             data.get("name", "?"), device_id)
+                    return True
+        except Exception:
+            log.exception("play_sound failed for device %s", device_id)
+        return False
