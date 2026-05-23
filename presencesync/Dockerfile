@@ -1,14 +1,23 @@
 ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-python:3.12-alpine3.19
-FROM dadoum/anisette-v3-server:latest AS anisette
+
+# ── Stage 1: build anisette-v3-server from source (works on all architectures) ──
+FROM debian:stable-slim AS anisette-builder
+RUN apt-get update && apt-get install --no-install-recommends -y \
+        ca-certificates ldc git clang dub libz-dev libssl-dev libplist-dev \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+RUN git clone --depth 1 https://github.com/Dadoum/anisette-v3-server.git . \
+    && DC=ldc2 dub build -c "static" --build-mode allAtOnce -b release --compiler=ldc2
+
+# ── Stage 2: final image ──
 FROM ${BUILD_FROM}
 
 ENV LANG=C.UTF-8 \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# Copy anisette-v3-server binary from upstream image
-COPY --from=anisette /opt/anisette-v3-server /usr/local/bin/anisette-v3-server
-COPY --from=anisette /opt/lib/ /opt/lib/
+# Copy anisette binary built for the target architecture
+COPY --from=anisette-builder /build/anisette-v3-server /usr/local/bin/anisette-v3-server
 
 # Install runtime deps — findmy requires cryptography (already in base), aiohttp, etc.
 RUN apk add --no-cache \
