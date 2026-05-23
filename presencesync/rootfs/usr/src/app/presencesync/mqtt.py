@@ -120,6 +120,11 @@ class MqttPublisher:
             cfg = state.get().mqtt
             obj = f"presencesync_{_slug(d.name)}"
             self._publish(f"{cfg.state_prefix}/{obj}/battery", str(int(d.battery_level * 100)))
+            # Publish battery sensor discovery if not already done
+            battery_key = f"{obj}_battery"
+            if battery_key not in self._published_discovery:
+                self._publish_battery_discovery(obj, d, cfg)
+                self._published_discovery.add(battery_key)
 
     def publish_fix(self, fix: LocationFix) -> None:
         if self._client is None or not self._connected.is_set():
@@ -170,6 +175,38 @@ class MqttPublisher:
         topic = f"{cfg.discovery_prefix}/device_tracker/{obj}/config"
         self._publish(topic, json.dumps(tracker_cfg))
         log.info("Discovery published: %s → %s", obj, topic)
+
+    def _publish_battery_discovery(self, obj: str, d: DeviceFix, cfg) -> None:
+        """Publish HA MQTT discovery for a battery sensor entity."""
+        device = {
+            "identifiers": [obj],
+            "name": d.name,
+            "manufacturer": "Apple",
+            "model": d.model or "Apple Device",
+            "via_device": "presencesync",
+        }
+        sensor_cfg = {
+            "name": "Battery",
+            "unique_id": f"{obj}_battery",
+            "state_topic": f"{cfg.state_prefix}/{obj}/battery",
+            "device_class": "battery",
+            "unit_of_measurement": "%",
+            "state_class": "measurement",
+            "availability_topic": self._availability_topic,
+            "device": device,
+        }
+        topic = f"{cfg.discovery_prefix}/sensor/{obj}_battery/config"
+        self._publish(topic, json.dumps(sensor_cfg))
+        log.info("Battery discovery published: %s → %s", obj, topic)
+
+    def publish_unavailable(self, device_id: str, device_name: str) -> None:
+        """Mark a device as unavailable (stale/offline)."""
+        if self._client is None or not self._connected.is_set():
+            return
+        cfg = state.get().mqtt
+        obj = f"presencesync_{_slug(device_name)}"
+        # Publish per-device availability as offline
+        self._publish(f"{cfg.state_prefix}/{obj}/state", "unavailable")
 
     def stop(self) -> None:
         if self._client is None:
