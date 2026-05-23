@@ -673,10 +673,12 @@ async def set_sources(body: dict):
 @app.post("/api/poll-now")
 async def poll_now():
     coord = get_coord()
-    fixes = await coord.apple.fetch_locations()
-    for f in fixes:
-        coord.mqtt.publish_fix(f)
-    return {"fixes": len(fixes), "mqtt_connected": coord.mqtt.connected}
+    await coord.poll_now()
+    return {
+        "airtag_fixes": len(coord.last_fixes),
+        "device_fixes": len(coord.last_device_fixes),
+        "mqtt_connected": coord.mqtt.connected,
+    }
 
 
 @app.post("/api/mqtt-test")

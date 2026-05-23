@@ -50,6 +50,19 @@ class TrackingConfig:
     include_airtags: bool = True
     ignored_identifiers: list[str] = field(default_factory=list)
 
+    # --- Smart tracking (iDevices) ---
+    dynamic_polling: bool = True             # enable distance/battery/stationary-aware intervals
+    flap_suppression_count: int = 3          # consecutive readings before state flip
+    stationary_threshold_minutes: int = 15   # no movement for this long → extend interval
+    battery_low_threshold: float = 0.20      # below this: double poll interval
+    battery_critical_threshold: float = 0.10 # below this: quadruple poll interval
+    stale_threshold_hours: float = 4.0       # mark unavailable after this (min 10min enforced in code)
+
+    # --- AirTag polling ---
+    airtag_poll_interval_s: int = 600        # default 10 minutes
+    airtag_movement_interval_s: int = 300    # accelerate to 5 minutes on significant movement
+    airtag_movement_threshold_m: float = 200.0  # displacement to count as "significant movement"
+
 
 @dataclass
 class Settings:
