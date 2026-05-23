@@ -31,12 +31,12 @@ map:
 options:
   log_level: info
   poll_interval_seconds: 60
-  anisette_url: http://homeassistant.local:6969
+  anisette_url: ""
   mqtt_discovery_prefix: homeassistant
   state_prefix: presencesync
 schema:
   log_level: list(debug|info|warning|error)
   poll_interval_seconds: int(15,3600)
-  anisette_url: url
+  anisette_url: str?
   mqtt_discovery_prefix: str
   state_prefix: str
