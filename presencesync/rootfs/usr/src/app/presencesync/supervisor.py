@@ -15,12 +15,15 @@ import aiohttp
 log = logging.getLogger(__name__)
 
 SUPERVISOR_BASE = "http://supervisor"
-# HA sets SUPERVISOR_TOKEN for modern add-ons; legacy installs use HASSIO_TOKEN.
-TOKEN = os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HASSIO_TOKEN") or ""
+
+
+def _get_token() -> str:
+    """Read the Supervisor token at call time — it may not be set at import time."""
+    return os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HASSIO_TOKEN") or ""
 
 
 def _headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
+    return {"Authorization": f"Bearer {_get_token()}", "Content-Type": "application/json"}
 
 
 @dataclass
@@ -42,7 +45,7 @@ class HomeInfo:
 
 async def discover_mqtt() -> MqttInfo | None:
     """Ask Supervisor for the MQTT service the user has installed (Mosquitto add-on, usually)."""
-    if not TOKEN:
+    if not _get_token():
         log.debug("no SUPERVISOR_TOKEN — skipping MQTT discovery")
         return None
     try:
@@ -76,7 +79,7 @@ async def discover_anisette_url(port: int = 6969) -> str | None:
     we don't know at build-time. /addons returns the list with the actual
     hostname for each installed add-on.
     """
-    if not TOKEN:
+    if not _get_token():
         return None
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
@@ -102,7 +105,7 @@ async def discover_anisette_url(port: int = 6969) -> str | None:
 
 async def discover_home() -> HomeInfo | None:
     """Pull latitude/longitude from HA core config + radius from zone.home."""
-    if not TOKEN:
+    if not _get_token():
         return None
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:

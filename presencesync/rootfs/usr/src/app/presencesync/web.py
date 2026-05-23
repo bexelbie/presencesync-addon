@@ -143,7 +143,7 @@ async def index(request: Request):
 async def supervisor_debug():
     """Dump what Supervisor tells us — for diagnosing addon discovery."""
     import aiohttp
-    token = supervisor.TOKEN
+    token = supervisor._get_token()
     headers = {"Authorization": f"Bearer {token}"}
     # Include the env vars HA might be using to inject the token
     env_keys = sorted(k for k in os.environ.keys()
