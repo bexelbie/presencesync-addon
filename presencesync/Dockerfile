@@ -9,6 +9,7 @@ ENV LANG=C.UTF-8 \
 RUN apk add --no-cache \
         ca-certificates \
         tzdata \
+        git \
     && pip3 install --no-cache-dir \
         findmy>=0.7.0 \
         pyicloud@git+https://github.com/timlaing/pyicloud.git@180e57c2cbda605ef3c042c3927d7772444676fe \
