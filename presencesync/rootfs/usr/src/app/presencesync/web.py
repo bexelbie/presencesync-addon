@@ -681,6 +681,33 @@ async def poll_now():
     }
 
 
+@app.get("/api/devices")
+async def list_devices():
+    """List all iCloud devices with IDs and capabilities."""
+    coord = get_coord()
+    import asyncio
+    devices = await asyncio.get_event_loop().run_in_executor(
+        None, coord.icloud.list_devices_brief
+    )
+    return {"devices": devices}
+
+
+@app.post("/api/devices/{device_id}/play-sound")
+async def play_sound(device_id: str):
+    """Trigger Find My alert sound on the specified device."""
+    coord = get_coord()
+    import asyncio
+    success = await asyncio.get_event_loop().run_in_executor(
+        None, coord.icloud.play_sound, device_id
+    )
+    if success:
+        return {"status": "ok", "device_id": device_id}
+    return JSONResponse(
+        {"error": "play_sound failed — device not found or not reachable"},
+        status_code=404,
+    )
+
+
 @app.post("/api/mqtt-test")
 async def mqtt_test():
     """Publish a heartbeat to confirm the broker is reachable + auth works."""
