@@ -11,7 +11,7 @@ RUN apk add --no-cache \
         tzdata \
     && pip3 install --no-cache-dir \
         findmy>=0.7.0 \
-        pyicloud>=2.5 \
+        pyicloud@git+https://github.com/timlaing/pyicloud.git@180e57c2cbda605ef3c042c3927d7772444676fe \
         paho-mqtt>=2.0 \
         fastapi>=0.110 \
         uvicorn[standard]>=0.27 \
