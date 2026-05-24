@@ -11,7 +11,7 @@ FROM rust:1.86-bookworm AS rust-builder
 RUN rustup toolchain install nightly && rustup default nightly
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev git ca-certificates \
+    pkg-config libssl-dev git ca-certificates protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 # Clone our patched repos (no --recursive since we replace apple-private-apis)
