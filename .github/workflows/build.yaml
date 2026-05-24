@@ -19,6 +19,7 @@ jobs:
       contents: read
       packages: write
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: amd64
@@ -27,9 +28,6 @@ jobs:
           - arch: aarch64
             platform: linux/arm64
             build_from: ghcr.io/home-assistant/aarch64-base-python:3.12-alpine3.19
-          - arch: armv7
-            platform: linux/arm/v7
-            build_from: ghcr.io/home-assistant/armv7-base-python:3.12-alpine3.19
 
     steps:
       - name: Checkout

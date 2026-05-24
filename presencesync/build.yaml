@@ -1,7 +1,6 @@
 build_from:
   amd64: ghcr.io/home-assistant/amd64-base-python:3.12-alpine3.19
   aarch64: ghcr.io/home-assistant/aarch64-base-python:3.12-alpine3.19
-  armv7: ghcr.io/home-assistant/armv7-base-python:3.12-alpine3.19
 labels:
   org.opencontainers.image.title: PresenceSync
   org.opencontainers.image.description: Track Apple Find My items in Home Assistant

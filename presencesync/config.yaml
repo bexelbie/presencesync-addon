@@ -6,7 +6,6 @@ image: ghcr.io/bexelbie/presencesync-{arch}
 arch:
   - amd64
   - aarch64
-  - armv7
 url: https://github.com/bexelbie/presencesync-addon
 init: false
 hassio_api: true
