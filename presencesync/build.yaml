@@ -5,5 +5,5 @@ build_from:
 labels:
   org.opencontainers.image.title: PresenceSync
   org.opencontainers.image.description: Track Apple Find My items in Home Assistant
-  org.opencontainers.image.source: https://github.com/PrayerfulDrop/presencesync-addon
+  org.opencontainers.image.source: https://github.com/bexelbie/presencesync-addon
   org.opencontainers.image.licenses: MIT
