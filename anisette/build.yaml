@@ -1,4 +1,0 @@
-build_from:
-  amd64: dadoum/anisette-v3-server:latest
-  aarch64: dadoum/anisette-v3-server:latest
-  armv7: dadoum/anisette-v3-server:latest
