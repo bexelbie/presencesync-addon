@@ -24,10 +24,10 @@ jobs:
         include:
           - arch: amd64
             platform: linux/amd64
-            build_from: ghcr.io/home-assistant/amd64-base-python:3.12-alpine3.19
+            build_from: ghcr.io/home-assistant/amd64-base-debian:bookworm
           - arch: aarch64
             platform: linux/arm64
-            build_from: ghcr.io/home-assistant/aarch64-base-python:3.12-alpine3.19
+            build_from: ghcr.io/home-assistant/aarch64-base-debian:bookworm
 
     steps:
       - name: Checkout
@@ -61,6 +61,7 @@ jobs:
           push: true
           build-args: |
             BUILD_FROM=${{ matrix.build_from }}
+            BUILD_ARCH=${{ matrix.arch }}
           tags: |
             ${{ env.IMAGE_BASE }}-${{ matrix.arch }}:${{ steps.version.outputs.version }}
             ${{ env.IMAGE_BASE }}-${{ matrix.arch }}:latest

@@ -1,8 +1,9 @@
 """Wrapper around findmy.py — login, 2FA, and AirTag location fetching.
 
-Uses LocalAnisetteProvider (built into findmy.py) by default — no external
-anisette server needed. Falls back to RemoteAnisetteProvider if anisette_url
-is explicitly configured.
+Handles both owned (via FindMy.py master_key rotation) and shared (via
+custom sharedFetch API with HKDF bundle keys) accessories.
+
+Uses RemoteAnisetteProvider pointing at the embedded anisette-v3-server.
 """
 from __future__ import annotations
 
@@ -14,15 +15,25 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from findmy import AsyncAppleAccount, FindMyAccessory, LoginState
-from findmy.reports.anisette import LocalAnisetteProvider, RemoteAnisetteProvider
+from findmy.reports.anisette import RemoteAnisetteProvider
 from findmy.plist import list_accessories
 from findmy import plist as _fm_plist
 
 from . import state
+from .shared_fetch import SharedAccessory, fetch_shared_locations, is_shared_plist
+from . import anisette_manager
 
 log = logging.getLogger(__name__)
 
-ANISETTE_LIBS_PATH = state.DATA_DIR / "anisette-libs"
+KEYS_DIR = state.DATA_DIR / "keys"
+
+
+def _get_anisette_dict(url: str) -> dict[str, str]:
+    """Fetch anisette headers from GET / as a plain dict."""
+    import requests
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
 
 
 @dataclass
@@ -37,25 +48,23 @@ class LocationFix:
 
 
 class AppleClient:
-    """Owns the AsyncAppleAccount + loaded AirTag accessories."""
+    """Owns the AsyncAppleAccount + loaded AirTag accessories (owned + shared)."""
 
     def __init__(self):
         self.account: AsyncAppleAccount | None = None
         self.anisette = None
         self.accessories: list[FindMyAccessory] = []
+        self.shared_accessories: list[SharedAccessory] = []
         self.beaconstore_key: bytes | None = None
         self._pending_2fa = None
         self.last_login_state: LoginState = LoginState.LOGGED_OUT
 
     def _make_anisette(self):
-        """Create the appropriate anisette provider."""
-        url = state.get().apple.anisette_url
-        if url:
-            log.info("Using remote anisette: %s", url)
-            return RemoteAnisetteProvider(url)
-        ANISETTE_LIBS_PATH.mkdir(parents=True, exist_ok=True)
-        log.info("Using local anisette (libs cached at %s)", ANISETTE_LIBS_PATH)
-        return LocalAnisetteProvider(libs_path=ANISETTE_LIBS_PATH)
+        """Create anisette provider pointing at embedded or external server."""
+        mgr = anisette_manager.get()
+        url = mgr.url
+        log.info("Using anisette at %s", url)
+        return RemoteAnisetteProvider(url)
 
     async def ensure_account(self) -> None:
         """Create the AsyncAppleAccount if not already initialized."""
@@ -112,23 +121,51 @@ class AppleClient:
         return result
 
     def load_bundle(self, bundle_dir: Path) -> None:
-        """Load AirTag accessories from extracted bundle directory."""
+        """Load AirTag accessories from extracted bundle directory.
+
+        Handles both:
+        - Owned accessories (via FindMy.py's list_accessories + BeaconStore.key)
+        - Shared accessories (custom SharedAccessory from plist with wildRootKey)
+        """
+        self.shared_accessories = []
+        self.accessories = []
+
+        # Load shared accessories from any plist that has shared fields
+        for plist_path in bundle_dir.glob("*.plist"):
+            if is_shared_plist(plist_path):
+                shared = SharedAccessory.from_plist(plist_path)
+                if shared:
+                    self.shared_accessories.append(shared)
+                    log.info("Loaded shared accessory: %s (%s)", shared.name, shared.share_id[:8])
+
+        # Load owned accessories (require BeaconStore.key)
         bs_path = bundle_dir / "BeaconStore.key"
-        if not bs_path.exists():
-            raise FileNotFoundError(f"BeaconStore.key missing in {bundle_dir}")
-        self.beaconstore_key = bs_path.read_bytes()
-        if len(self.beaconstore_key) != 32:
-            raise ValueError(f"BeaconStore.key is {len(self.beaconstore_key)}B, expected 32")
+        if bs_path.exists():
+            self.beaconstore_key = bs_path.read_bytes()
+            if len(self.beaconstore_key) != 32:
+                log.warning("BeaconStore.key is %dB, expected 32 — skipping owned accessories",
+                            len(self.beaconstore_key))
+            else:
+                # Remove macOS AppleDouble sidecars
+                for p in bundle_dir.rglob("._*"):
+                    if p.is_file():
+                        p.unlink(missing_ok=True)
+                _fm_plist._DEFAULT_SEARCH_PATH = bundle_dir
+                self.accessories = list_accessories(key=self.beaconstore_key, search_path=bundle_dir)
+        else:
+            log.info("No BeaconStore.key found — only shared accessories loaded")
 
-        # Remove macOS AppleDouble sidecars that confuse findmy's plist parser
-        for p in bundle_dir.rglob("._*"):
-            if p.is_file():
-                p.unlink(missing_ok=True)
+        log.info("Loaded: %d owned + %d shared accessories",
+                 len(self.accessories), len(self.shared_accessories))
 
-        # Monkey-patch findmy's default search path to our bundle location
-        _fm_plist._DEFAULT_SEARCH_PATH = bundle_dir
-        self.accessories = list_accessories(key=self.beaconstore_key, search_path=bundle_dir)
-        log.info("Loaded bundle: %d accessories", len(self.accessories))
+    def load_keys_dir(self) -> None:
+        """Load accessories from /data/keys/ (output of export-findmy)."""
+        if not KEYS_DIR.exists():
+            return
+        plists = list(KEYS_DIR.glob("*.plist"))
+        if not plists:
+            return
+        self.load_bundle(KEYS_DIR)
 
     async def fetch_locations(self) -> list[LocationFix]:
         if self.account is None or self.last_login_state != LoginState.LOGGED_IN:
@@ -167,7 +204,75 @@ class AppleClient:
                 horizontal_accuracy=float(report.horizontal_accuracy),
                 timestamp_unix=int(report.timestamp.timestamp()),
             ))
-        log.info("fetch_locations: %d/%d accessories reported", len(out), len(self.accessories))
+        log.info("fetch_locations: %d/%d owned accessories reported", len(out), len(self.accessories))
+        return out
+
+    async def fetch_shared_location_fixes(self) -> list[LocationFix]:
+        """Fetch locations for shared accessories via custom sharedFetch API."""
+        if self.account is None or self.last_login_state != LoginState.LOGGED_IN:
+            return []
+        if not self.shared_accessories:
+            return []
+
+        # Get credentials from the account's internal state
+        try:
+            login_data = self.account._login_state_data
+            mobileme = login_data.get("mobileme_data", {})
+            tokens = mobileme.get("tokens", {})
+            search_party_token = tokens.get("searchPartyToken", "")
+            dsid = str(login_data.get("dsid", ""))
+            if not search_party_token or not dsid:
+                log.warning("Cannot fetch shared: missing searchPartyToken or dsid")
+                return []
+        except Exception as e:
+            log.warning("Cannot fetch shared: failed to get tokens: %s", e)
+            return []
+
+        # Get anisette headers from the account's anisette provider
+        # This is the proper way — the provider generates user-specific headers
+        try:
+            if self.anisette is not None:
+                anisette_headers = await asyncio.get_event_loop().run_in_executor(
+                    None, self.anisette.get_headers
+                )
+            else:
+                mgr = anisette_manager.get()
+                anisette_headers = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: _get_anisette_dict(mgr.url)
+                )
+        except Exception as e:
+            log.warning("Cannot fetch shared: anisette failed: %s", e)
+            return []
+
+        # Call shared fetch (blocking I/O → run in executor)
+        try:
+            results = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: fetch_shared_locations(
+                    dsid, search_party_token, anisette_headers, self.shared_accessories
+                )
+            )
+        except Exception:
+            log.exception("shared fetch failed")
+            return []
+
+        # Convert to LocationFix (use most recent report per accessory)
+        out: list[LocationFix] = []
+        for name, reports in results.items():
+            if not reports:
+                continue
+            latest = max(reports, key=lambda r: r.timestamp)
+            out.append(LocationFix(
+                identifier=f"shared-{name}",
+                name=name,
+                model="AirTag (Shared)",
+                latitude=latest.latitude,
+                longitude=latest.longitude,
+                horizontal_accuracy=float(latest.accuracy),
+                timestamp_unix=int(latest.timestamp.timestamp()),
+            ))
+        log.info("fetch_shared: %d/%d shared accessories reported",
+                 len(out), len(self.shared_accessories))
         return out
 
     def _persist(self) -> None:

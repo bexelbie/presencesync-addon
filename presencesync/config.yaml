@@ -1,7 +1,7 @@
 name: PresenceSync
-version: "0.4.0"
+version: "0.5.0"
 slug: presencesync
-description: Track Apple AirTags, iPhones, iPads, Macs, and Apple Watches in Home Assistant via Find My.
+description: Track Apple AirTags (owned + shared), iPhones, iPads, Macs, and Apple Watches in Home Assistant via Find My.
 image: ghcr.io/bexelbie/presencesync-{arch}
 arch:
   - amd64
@@ -17,13 +17,10 @@ host_network: false
 ingress: true
 ingress_port: 8099
 ingress_entry: /
-panel_icon: mdi:map-marker-multiple
-panel_title: PresenceSync
-panel_admin: true
 ports:
   8099/tcp: null
 ports_description:
-  8099/tcp: PresenceSync setup wizard (also reachable via HA sidebar)
+  8099/tcp: PresenceSync API (reachable via HA Ingress)
 boot: auto
 startup: services
 map:
@@ -32,7 +29,9 @@ options:
   log_level: info
   mqtt_discovery_prefix: homeassistant
   state_prefix: presencesync
+  anisette_url: ""
 schema:
   log_level: list(debug|info|warning|error)
   mqtt_discovery_prefix: str
   state_prefix: str
+  anisette_url: str?

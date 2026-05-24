@@ -21,6 +21,8 @@ from findmy import LoginState
 
 from . import state, supervisor
 from .coordinator import get as get_coord
+from . import extractor as _extractor_mod
+from . import anisette_manager
 
 log = logging.getLogger("presencesync")
 logging.basicConfig(level=os.environ.get("PRESENCESYNC_LOG_LEVEL", "info").upper(),
@@ -103,15 +105,19 @@ async def status():
     """Lightweight status for debugging — replaces the old dashboard."""
     coord = get_coord()
     s = state.get()
+    mgr = anisette_manager.get()
     return {
         "version": __import__("presencesync").__version__,
         "findmy_login_state": str(coord.apple.last_login_state),
         "icloud_login_state": coord.icloud.login_state,
         "mqtt_connected": coord.mqtt.connected,
-        "airtags_loaded": len(coord.apple.accessories),
+        "airtags_owned": len(coord.apple.accessories),
+        "airtags_shared": len(coord.apple.shared_accessories),
         "last_poll_unix": coord.last_run_unix,
         "airtag_fixes": len(coord.last_fixes),
         "device_fixes": len(coord.last_device_fixes),
+        "anisette_running": mgr.running,
+        "extractor_available": _extractor_mod.get().available,
     }
 
 
@@ -277,5 +283,112 @@ async def reset():
     coord = get_coord()
     coord.apple.account = None
     coord.apple.accessories = []
+    coord.apple.shared_accessories = []
     coord.apple.beaconstore_key = None
     return {"ok": True}
+
+
+# ─── Key Extraction ───────────────────────────────────────────────────────────
+
+@app.get("/api/extract/status")
+async def extract_status():
+    """Get current extraction status."""
+    ext = _extractor_mod.get()
+    s = ext.status
+    return {
+        "phase": s.phase,
+        "message": s.message,
+        "bottles": s.bottles,
+        "extracted_count": s.extracted_count,
+        "error": s.error,
+        "available": ext.available,
+    }
+
+
+@app.post("/api/extract/start")
+async def extract_start(body: dict):
+    """Start key extraction. Requires apple_id."""
+    apple_id = body.get("apple_id") or state.get().apple.username
+    if not apple_id:
+        raise HTTPException(400, "apple_id required")
+    mgr = anisette_manager.get()
+    if not await mgr.ensure_running():
+        raise HTTPException(503, "anisette server not available")
+    ext = _extractor_mod.get()
+    result = await ext.start_extraction(apple_id, mgr.url)
+    return {"phase": result.phase, "message": result.message}
+
+
+@app.post("/api/extract/password")
+async def extract_password(body: dict):
+    """Submit password for extraction."""
+    password = body.get("password") or ""
+    if not password:
+        raise HTTPException(400, "password required")
+    ext = _extractor_mod.get()
+    result = await ext.submit_password(password)
+    return {"phase": result.phase, "message": result.message}
+
+
+@app.post("/api/extract/2fa")
+async def extract_2fa(body: dict):
+    """Submit 2FA code for extraction."""
+    code = body.get("code") or ""
+    if not code:
+        raise HTTPException(400, "code required")
+    ext = _extractor_mod.get()
+    result = await ext.submit_2fa(code)
+    return {
+        "phase": result.phase,
+        "message": result.message,
+        "bottles": result.bottles,
+    }
+
+
+@app.post("/api/extract/bottle")
+async def extract_bottle(body: dict):
+    """Select escrow bottle by index."""
+    index = body.get("index")
+    if index is None:
+        raise HTTPException(400, "index required")
+    ext = _extractor_mod.get()
+    result = await ext.submit_bottle_choice(int(index))
+    return {"phase": result.phase, "message": result.message}
+
+
+@app.post("/api/extract/passcode")
+async def extract_passcode(body: dict):
+    """Submit device passcode to unlock escrow bottle."""
+    passcode = body.get("passcode") or ""
+    if not passcode:
+        raise HTTPException(400, "passcode required")
+    ext = _extractor_mod.get()
+    result = await ext.submit_passcode(passcode)
+    if result.phase == "done":
+        # Reload keys after successful extraction
+        coord = get_coord()
+        coord.apple.load_keys_dir()
+    return {
+        "phase": result.phase,
+        "message": result.message,
+        "extracted_count": result.extracted_count,
+        "error": result.error,
+    }
+
+
+@app.get("/api/extract/keys")
+async def list_keys():
+    """List extracted key files."""
+    ext = _extractor_mod.get()
+    keys = ext.get_extracted_keys()
+    return {"keys": [{"name": k.name, "size": k.stat().st_size} for k in keys]}
+
+
+# ─── Poll Now ─────────────────────────────────────────────────────────────────
+
+@app.post("/api/poll-now")
+async def poll_now():
+    """Trigger immediate poll of all loops."""
+    coord = get_coord()
+    await coord.poll_now()
+    return {"ok": True, "fixes": len(coord.last_fixes), "devices": len(coord.last_device_fixes)}

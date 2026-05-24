@@ -14,6 +14,8 @@ DATA_DIR = Path(os.environ.get("PRESENCESYNC_DATA_DIR", "/data"))
 CONFIG_PATH = DATA_DIR / "presencesync.json"
 APPLE_STATE_PATH = DATA_DIR / "apple_state.pickle"
 BUNDLE_DIR = DATA_DIR / "bundle"
+KEYS_DIR = DATA_DIR / "keys"
+DEVICE_IDENTITY_PATH = DATA_DIR / "device_identity.json"
 
 
 @dataclass

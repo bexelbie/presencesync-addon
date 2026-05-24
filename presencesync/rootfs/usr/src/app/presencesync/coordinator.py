@@ -2,6 +2,7 @@
 
 Two independent loops:
 - AirTag loop: slow cadence (default 10min), accelerates on movement
+  - Fetches both owned and shared accessories
 - iDevice loop: governed by tracker.py intelligence (battery/distance/stationary-aware)
 """
 from __future__ import annotations
@@ -18,6 +19,7 @@ from .apple import AppleClient, LocationFix
 from .icloud import ICloudClient
 from .mqtt import MqttPublisher
 from .tracker import TrackerManager, PublishAction
+from . import anisette_manager
 
 log = logging.getLogger(__name__)
 
@@ -55,12 +57,24 @@ class Coordinator:
             return
         self._stop_event.clear()
         self.mqtt.configure()
+
+        # Start anisette server
+        mgr = anisette_manager.get()
+        if not await mgr.ensure_running():
+            log.warning("Anisette server not available — AirTag fetch will fail")
+
         try:
             await self.apple.ensure_account()
         except Exception:
             log.exception("apple.ensure_account failed; will retry in poll loop")
 
-        # Auto-reload the bundle from /data/bundle/ if we have one on disk.
+        # Auto-load keys from /data/keys/ (output of export-findmy)
+        try:
+            self.apple.load_keys_dir()
+        except Exception:
+            log.debug("No keys in /data/keys/ yet")
+
+        # Also try legacy bundle directory
         if state.get().bundle_uploaded:
             try:
                 self.apple.load_bundle(state.BUNDLE_DIR)
@@ -107,21 +121,39 @@ class Coordinator:
                 pass
 
     async def _tick_airtags(self) -> bool:
-        """Fetch AirTag locations. Returns True if significant movement detected."""
+        """Fetch AirTag locations (owned + shared). Returns True if movement detected."""
         s = state.get()
         if not s.tracking.include_airtags:
             log.debug("AirTag fetch skipped: include_airtags=False")
             self.last_fixes = []
             return False
 
-        if not (s.bundle_uploaded and self.apple.last_login_state == LoginState.LOGGED_IN):
-            log.debug("AirTag fetch skipped: bundle=%s apple=%s",
-                      s.bundle_uploaded, self.apple.last_login_state)
+        has_owned = bool(self.apple.accessories)
+        has_shared = bool(self.apple.shared_accessories)
+        logged_in = self.apple.last_login_state == LoginState.LOGGED_IN
+
+        if not logged_in:
+            log.debug("AirTag fetch skipped: not logged in (state=%s)", self.apple.last_login_state)
             return False
 
-        log.info("airtag tick: fetching locations for %d accessories",
-                 len(self.apple.accessories))
-        fixes = await self.apple.fetch_locations()
+        if not has_owned and not has_shared:
+            log.debug("AirTag fetch skipped: no accessories loaded")
+            return False
+
+        fixes: list[LocationFix] = []
+
+        # Fetch owned accessories via FindMy.py
+        if has_owned:
+            log.info("airtag tick: fetching %d owned accessories", len(self.apple.accessories))
+            owned_fixes = await self.apple.fetch_locations()
+            fixes.extend(owned_fixes)
+
+        # Fetch shared accessories via custom sharedFetch
+        if has_shared:
+            log.info("airtag tick: fetching %d shared accessories", len(self.apple.shared_accessories))
+            shared_fixes = await self.apple.fetch_shared_location_fixes()
+            fixes.extend(shared_fixes)
+
         self.last_fixes = fixes
         self.last_run_unix = int(time.time())
 
