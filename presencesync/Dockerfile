@@ -11,16 +11,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone our patched repos
+# Clone our patched repos (no --recursive since we replace apple-private-apis)
 RUN git clone --branch presencesync --depth 1 \
     https://github.com/bexelbie/rustpush.git /build/rustpush-local \
     && cd /build/rustpush-local \
-    && git submodule update --init --recursive
+    && git submodule update --init open-absinthe
 
 # Clone apple-private-apis fork with omnisette patches
 RUN rm -rf /build/rustpush-local/apple-private-apis \
     && git clone --branch presencesync --depth 1 \
     https://github.com/bexelbie/apple-private-apis.git /build/rustpush-local/apple-private-apis
+
+# Create stub clearadi crate (optional dep, not used, but cargo resolves all path deps)
+RUN mkdir -p /build/rustpush-local/apple-private-apis/clearadi/src \
+    && printf '[package]\nname = "clearadi"\nversion = "1.0.0"\nedition = "2021"\n\n[dependencies]\nserde = { version = "1", features = ["derive"] }\n' \
+       > /build/rustpush-local/apple-private-apis/clearadi/Cargo.toml \
+    && echo '' > /build/rustpush-local/apple-private-apis/clearadi/src/lib.rs
 
 RUN git clone --depth 1 \
     https://github.com/bexelbie/export-findmy.git /build/export-findmy
