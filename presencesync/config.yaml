@@ -1,7 +1,7 @@
 name: PresenceSync
-version: "0.3.2"
+version: "0.4.0"
 slug: presencesync
-description: Track Apple AirTags, AirPods, iPhones, iPads, Macs, and Apple Watches in Home Assistant. One-time setup via web UI — no MQTT bridge running on your Mac, no SSH keys, no YAML.
+description: Track Apple AirTags, iPhones, iPads, Macs, and Apple Watches in Home Assistant via Find My.
 image: ghcr.io/bexelbie/presencesync-{arch}
 arch:
   - amd64
@@ -23,20 +23,16 @@ panel_admin: true
 ports:
   8099/tcp: null
 ports_description:
-  8099/tcp: PresenceSync web UI (also reachable via the HA sidebar)
+  8099/tcp: PresenceSync setup wizard (also reachable via HA sidebar)
 boot: auto
 startup: services
 map:
   - share:rw
 options:
   log_level: info
-  poll_interval_seconds: 60
-  anisette_url: ""
   mqtt_discovery_prefix: homeassistant
   state_prefix: presencesync
 schema:
   log_level: list(debug|info|warning|error)
-  poll_interval_seconds: int(15,3600)
-  anisette_url: str?
   mqtt_discovery_prefix: str
   state_prefix: str

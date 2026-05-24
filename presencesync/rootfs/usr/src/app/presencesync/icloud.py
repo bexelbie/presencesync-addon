@@ -1,36 +1,18 @@
-"""Apple iCloud client for FAMILY DEVICES + FRIENDS.
+"""Apple iCloud client for FAMILY DEVICES.
 
-Complements `apple.py` (findmy.py wrapper for AirTags). This module uses
-`pyicloud` to talk to `fmipmobile.icloud.com` — the endpoint that powers
-the Find My iPhone webapp and Apple's official Find My app's
-device/family views.
-
-Why both? findmy.py covers the BLE-relayed offline-finding network
-(AirTags, AirPods Pro, tagged accessories). pyicloud covers the
-account-side device list (iPhones / iPads / Macs / Watches reporting
-their own GPS, plus shared-Family-Sharing devices, plus friends who've
-shared their location).
-
-The two libraries use different Apple endpoints and authenticate via
-different protocols, so we hold both sessions in parallel. Both persist
-to `/data` so the user only does 2FA once per Apple-server invalidation.
+Uses pyicloud (timlaing fork) to talk to fmipmobile.icloud.com — the endpoint
+that powers Find My iPhone. Provides: device locations, battery levels, and
+play_sound capability.
 
 Module-load monkey-patches:
-- pyicloud.session.PyiCloudSession gets an IPv4-only adapter mounted on
-  Apple's three auth hosts (idmsa.apple.com, appleid.apple.com,
-  auth.apple.com). Apple's auth servers don't speak IPv6 reliably and
-  silently fail to push 2FA codes when contacted over v6. This is the
-  fix iCloud3 v3.5 (May 2026) shipped after months of HSA2 breakage.
+- PyiCloudSession gets an IPv4-only adapter on Apple's auth hosts.
+  Apple's auth servers silently fail 2FA push over IPv6.
 """
 from __future__ import annotations
 
 import logging
-import math
 import socket
-import time
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Iterable
 
 import urllib3.util.connection
 from requests.adapters import HTTPAdapter
@@ -42,14 +24,10 @@ log = logging.getLogger(__name__)
 COOKIE_DIR = state.DATA_DIR / "pyicloud-cookies"
 
 
-# ── IPv4-only adapter for Apple auth endpoints (iCloud3 v3.5 workaround) ─
-class _IPv4OnlyAdapter(HTTPAdapter):
-    """Force the underlying urllib3 connection pool to use AF_INET only.
+# ── IPv4-only adapter for Apple auth endpoints ───────────────────────────────
 
-    Apple's auth servers (idmsa/appleid/auth.apple.com) accept IPv6 connections
-    but then silently fail to deliver the 2FA push notification flow. Forcing
-    DNS to return only IPv4 addresses for those hosts makes HSA2 work again.
-    """
+class _IPv4OnlyAdapter(HTTPAdapter):
+    """Force AF_INET for Apple auth hosts (iCloud3 v3.5 workaround)."""
     def send(self, request, **kwargs):
         original = urllib3.util.connection.allowed_gai_family
         urllib3.util.connection.allowed_gai_family = lambda: socket.AF_INET
@@ -59,19 +37,11 @@ class _IPv4OnlyAdapter(HTTPAdapter):
             urllib3.util.connection.allowed_gai_family = original
 
 
-def _install_ipv4_patch_on_pyicloud_session() -> None:
-    """Mount IPv4-only adapter on every PyiCloudSession instance.
-
-    Wraps PyiCloudSession.__init__ so all future sessions get the adapter
-    bound to the three auth hosts. Other Apple endpoints (fmipmobile, etc.)
-    are unaffected and remain free to use IPv4 or IPv6.
-    """
+def _install_ipv4_patch() -> None:
     try:
         from pyicloud.session import PyiCloudSession
     except Exception:
-        log.warning("pyicloud not importable yet — IPv4 patch deferred")
         return
-
     if getattr(PyiCloudSession, "_presencesync_ipv4_patched", False):
         return
     _orig_init = PyiCloudSession.__init__
@@ -86,11 +56,10 @@ def _install_ipv4_patch_on_pyicloud_session() -> None:
 
     PyiCloudSession.__init__ = _patched_init
     PyiCloudSession._presencesync_ipv4_patched = True
-    log.info("pyicloud: IPv4 adapter mounted on idmsa/appleid/auth.apple.com")
+    log.info("pyicloud: IPv4 adapter mounted on Apple auth hosts")
 
 
-# Run at module load so it's in place before any PyiCloudService is constructed.
-_install_ipv4_patch_on_pyicloud_session()
+_install_ipv4_patch()
 
 
 @dataclass
@@ -103,20 +72,16 @@ class DeviceFix:
     longitude: float
     horizontal_accuracy: float
     timestamp_unix: int
-    battery_level: float | None     # 0.0-1.0, may be None
-    battery_status: str | None      # "Charging", "NotCharging", etc.
-    device_class: str | None        # "iPhone", "iPad", "Mac", "Watch"
-    person_id: str | None = None    # Family member ID, None for self
-    person_name: str | None = None  # Family member display name
+    battery_level: float | None
+    battery_status: str | None
+    device_class: str | None
 
 
 class ICloudClient:
-    """Thin wrapper around pyicloud — auth, persistent cookies, device fetch."""
+    """Thin wrapper around pyicloud — auth, cookies, device fetch, play_sound."""
 
     def __init__(self):
         self._api = None
-        self._last_login_state = "logged_out"
-        self._pending_trusted_device: dict | None = None
         COOKIE_DIR.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -130,7 +95,6 @@ class ICloudClient:
         return "logged_in"
 
     def login(self, apple_id: str, password: str) -> str:
-        """Initiate login. Returns the resulting login state."""
         from pyicloud import PyiCloudService
         try:
             self._api = PyiCloudService(
@@ -139,12 +103,11 @@ class ICloudClient:
                 cookie_directory=str(COOKIE_DIR),
                 with_family=True,
             )
-        except Exception as err:
+        except Exception:
             log.exception("pyicloud login failed")
             self._api = None
             raise
-        log.info("pyicloud login → state=%s, trusted_session=%s",
-                 self.login_state, getattr(self._api, "is_trusted_session", False))
+        log.info("pyicloud login → state=%s", self.login_state)
         return self.login_state
 
     def submit_2fa(self, code: str) -> str:
@@ -154,18 +117,11 @@ class ICloudClient:
         if not ok:
             raise RuntimeError("pyicloud rejected the 2FA code")
         if not self._api.is_trusted_session:
-            log.info("Marking pyicloud session as trusted (avoids 2FA next restart)")
             self._api.trust_session()
         return self.login_state
 
-    def resume_from_cookies(self, apple_id: str, password: str) -> str:
-        """Try to resume a saved session from /data/pyicloud-cookies/."""
-        # pyicloud auto-loads cookies when you instantiate it; the same call
-        # as login() works — just won't ask for 2FA if the session is trusted.
-        return self.login(apple_id, password)
-
     def fetch_devices(self) -> list[DeviceFix]:
-        """Get current locations of all owned + family-shared devices."""
+        """Get current locations of all owned + family devices."""
         if self._api is None or self.login_state != "logged_in":
             return []
         out: list[DeviceFix] = []
@@ -177,8 +133,8 @@ class ICloudClient:
                     continue
                 ts_ms = loc.get("timeStamp") or 0
                 out.append(DeviceFix(
-                    identifier=data.get("id") or data.get("deviceDiscoveryId") or "?",
-                    name=data.get("name") or "?",
+                    identifier=data.get("id") or data.get("deviceDiscoveryId") or "unknown",
+                    name=data.get("name") or "unknown",
                     model=data.get("deviceDisplayName") or data.get("rawDeviceModel"),
                     latitude=float(loc["latitude"]),
                     longitude=float(loc["longitude"]),
@@ -187,35 +143,14 @@ class ICloudClient:
                     battery_level=(float(data["batteryLevel"]) if data.get("batteryLevel") is not None else None),
                     battery_status=data.get("batteryStatus"),
                     device_class=data.get("deviceClass"),
-                    person_id=data.get("prsId"),
-                    person_name=None,  # filled in by caller if family info available
                 ))
         except Exception:
             log.exception("pyicloud devices fetch failed")
-        log.info("pyicloud devices: %d with location", len(out))
-        return out
-
-    def list_devices_brief(self) -> list[dict]:
-        """List all devices with their IDs and names (for API exposure)."""
-        if self._api is None or self.login_state != "logged_in":
-            return []
-        out = []
-        try:
-            for dev in self._api.devices:
-                data = dev.data if hasattr(dev, "data") else {}
-                out.append({
-                    "id": data.get("id") or data.get("deviceDiscoveryId") or "?",
-                    "name": data.get("name") or "?",
-                    "model": data.get("deviceDisplayName") or data.get("rawDeviceModel"),
-                    "device_class": data.get("deviceClass"),
-                    "sound_available": getattr(dev, "sound_available", True),
-                })
-        except Exception:
-            log.exception("pyicloud list_devices_brief failed")
+        log.info("pyicloud: %d devices with location", len(out))
         return out
 
     def play_sound(self, device_id: str, subject: str = "Find My iPhone Alert") -> bool:
-        """Trigger Find My alert sound on a device. Returns True if successful."""
+        """Trigger Find My alert sound on a device."""
         if self._api is None or self.login_state != "logged_in":
             return False
         try:
@@ -224,9 +159,8 @@ class ICloudClient:
                 dev_id = data.get("id") or data.get("deviceDiscoveryId")
                 if dev_id == device_id:
                     dev.play_sound(subject=subject)
-                    log.info("play_sound triggered on device %s (%s)",
-                             data.get("name", "?"), device_id)
+                    log.info("play_sound: %s (%s)", data.get("name", "?"), device_id)
                     return True
         except Exception:
-            log.exception("play_sound failed for device %s", device_id)
+            log.exception("play_sound failed for %s", device_id)
         return False

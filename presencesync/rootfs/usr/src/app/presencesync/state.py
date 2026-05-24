@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -14,8 +13,7 @@ log = logging.getLogger("presencesync.state")
 DATA_DIR = Path(os.environ.get("PRESENCESYNC_DATA_DIR", "/data"))
 CONFIG_PATH = DATA_DIR / "presencesync.json"
 APPLE_STATE_PATH = DATA_DIR / "apple_state.pickle"
-APPLE_STATE_PATH_LEGACY = DATA_DIR / "apple_state.json"  # historical JSON file
-BUNDLE_DIR = DATA_DIR / "bundle"  # extracted bundle contents
+BUNDLE_DIR = DATA_DIR / "bundle"
 
 
 @dataclass
@@ -38,30 +36,28 @@ class MqttConfig:
 @dataclass
 class AppleConfig:
     username: str = ""
-    password: str = ""           # stored in clear text on the add-on's /data volume; HA-controlled
-    anisette_url: str = ""
+    password: str = ""
+    anisette_url: str = ""  # empty = use built-in LocalAnisetteProvider
 
 
 @dataclass
 class TrackingConfig:
     poll_interval_s: int = 60
-    include_audio_accessories: bool = False  # AirPods etc
-    include_devices: bool = True             # iPhone / iPad / Mac / Watch
+    include_devices: bool = True
     include_airtags: bool = True
-    ignored_identifiers: list[str] = field(default_factory=list)
 
-    # --- Smart tracking (iDevices) ---
-    dynamic_polling: bool = True             # enable distance/battery/stationary-aware intervals
-    flap_suppression_count: int = 3          # consecutive readings before state flip
-    stationary_threshold_minutes: int = 15   # no movement for this long → extend interval
-    battery_low_threshold: float = 0.20      # below this: double poll interval
-    battery_critical_threshold: float = 0.10 # below this: quadruple poll interval
-    stale_threshold_hours: float = 4.0       # mark unavailable after this (min 10min enforced in code)
+    # Smart polling (global — pyicloud fetches all devices at once)
+    dynamic_polling: bool = True
+    flap_suppression_count: int = 3
+    stationary_threshold_minutes: int = 15
+    battery_low_threshold: float = 0.20
+    battery_critical_threshold: float = 0.10
+    stale_threshold_hours: float = 4.0
 
-    # --- AirTag polling ---
-    airtag_poll_interval_s: int = 600        # default 10 minutes
-    airtag_movement_interval_s: int = 300    # accelerate to 5 minutes on significant movement
-    airtag_movement_threshold_m: float = 200.0  # displacement to count as "significant movement"
+    # AirTag polling
+    airtag_poll_interval_s: int = 600
+    airtag_movement_interval_s: int = 300
+    airtag_movement_threshold_m: float = 200.0
 
 
 @dataclass
@@ -70,18 +66,22 @@ class Settings:
     mqtt: MqttConfig = field(default_factory=MqttConfig)
     home: HomeLocation = field(default_factory=HomeLocation)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
-    bundle_uploaded: bool = False  # set True once user uploads a presencesync-bundle.tar.gz
+    bundle_uploaded: bool = False
 
     @classmethod
     def load(cls) -> "Settings":
         if not CONFIG_PATH.exists():
             return cls()
-        raw = json.loads(CONFIG_PATH.read_text())
+        try:
+            raw = json.loads(CONFIG_PATH.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning("Failed to load config (%s), using defaults", e)
+            return cls()
         return cls(
-            apple=AppleConfig(**raw.get("apple", {})),
-            mqtt=MqttConfig(**raw.get("mqtt", {})),
-            home=HomeLocation(**raw.get("home", {})),
-            tracking=TrackingConfig(**raw.get("tracking", {})),
+            apple=AppleConfig(**{k: v for k, v in raw.get("apple", {}).items() if k in AppleConfig.__dataclass_fields__}),
+            mqtt=MqttConfig(**{k: v for k, v in raw.get("mqtt", {}).items() if k in MqttConfig.__dataclass_fields__}),
+            home=HomeLocation(**{k: v for k, v in raw.get("home", {}).items() if k in HomeLocation.__dataclass_fields__}),
+            tracking=TrackingConfig(**{k: v for k, v in raw.get("tracking", {}).items() if k in TrackingConfig.__dataclass_fields__}),
             bundle_uploaded=raw.get("bundle_uploaded", False),
         )
 
@@ -92,7 +92,6 @@ class Settings:
         tmp.replace(CONFIG_PATH)
 
 
-# Single in-memory copy plus a write lock
 _settings = Settings.load()
 _lock = asyncio.Lock()
 
@@ -108,59 +107,32 @@ async def update(mutator) -> Settings:
     return _settings
 
 
-# --- Apple auth state ---------------------------------------------------
-# We save the AccountStateMapping subset of AsyncAppleAccount.__getstate__()
-# rather than the full __dict__: the full dict contains a reference to the
-# running uvloop event loop, which can't be pickled (uvloop.Loop has a
-# non-trivial __cinit__ and refuses pickle protocol). The subset is enough
-# for AsyncAppleAccount(state_info=...) to reconstruct the session.
+# --- Apple auth state persistence ---
 
-_APPLE_STATE_KEEP_KEYS = ("type", "ids", "account", "login", "anisette")
-
-
-def save_apple_state(state: object) -> None:
+def save_apple_state(state_data: object) -> None:
     import pickle
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    payload = state
-    # If we got a dict, filter to AccountStateMapping schema keys first.
-    if isinstance(state, dict):
-        all_keys = sorted(state.keys())
-        payload = {k: v for k, v in state.items() if k in _APPLE_STATE_KEEP_KEYS}
-        log.info("apple_state: keeping %d/%d top-level keys (%s); ALL keys present: %s",
-                 len(payload), len(state), sorted(payload.keys()), all_keys)
-        # If the AccountStateMapping filter caught nothing, the dict is probably
-        # the full __dict__ (with leading-underscore field names) rather than
-        # the schema'd export. Try pickling the whole thing and let the per-key
-        # fallback drop the unpicklable uvloop bits.
-        if not payload:
-            payload = state
     try:
-        data = pickle.dumps(payload)
+        data = pickle.dumps(state_data)
     except (TypeError, ValueError) as err:
-        log.warning("apple_state: pickle failed (%s) — saving per-key best-effort", err)
-        # Last-resort: try to pickle each value individually, drop the ones
-        # that fail. This usually keeps the auth tokens while dropping any
-        # cached aiohttp sessions or loop references that snuck in.
-        if isinstance(payload, dict):
+        log.warning("apple_state: pickle failed (%s)", err)
+        if isinstance(state_data, dict):
             cleaned = {}
-            for k, v in payload.items():
+            for k, v in state_data.items():
                 try:
                     pickle.dumps(v)
                     cleaned[k] = v
                 except Exception:
-                    log.debug("apple_state: skipping unpicklable key %s", k)
+                    pass
             try:
                 data = pickle.dumps(cleaned)
-                log.info("apple_state: salvaged %d keys after filter", len(cleaned))
-            except Exception as err2:
-                log.warning("apple_state: even per-key filter failed: %s", err2)
+            except Exception:
                 return
         else:
             return
     tmp = APPLE_STATE_PATH.with_suffix(".tmp")
     tmp.write_bytes(data)
     tmp.replace(APPLE_STATE_PATH)
-    APPLE_STATE_PATH_LEGACY.unlink(missing_ok=True)
 
 
 def load_apple_state():
@@ -169,19 +141,10 @@ def load_apple_state():
         try:
             return pickle.loads(APPLE_STATE_PATH.read_bytes())
         except Exception as err:
-            log.warning("apple_state.pickle exists but won't load (%s); clearing", err)
+            log.warning("apple_state.pickle corrupt (%s); clearing", err)
             APPLE_STATE_PATH.unlink(missing_ok=True)
-    # Fallback to old JSON file (one-time migration: probably broken but try)
-    if APPLE_STATE_PATH_LEGACY.exists():
-        try:
-            data = json.loads(APPLE_STATE_PATH_LEGACY.read_text())
-            APPLE_STATE_PATH_LEGACY.unlink(missing_ok=True)
-            return data
-        except Exception:
-            APPLE_STATE_PATH_LEGACY.unlink(missing_ok=True)
     return None
 
 
 def clear_apple_state() -> None:
     APPLE_STATE_PATH.unlink(missing_ok=True)
-    APPLE_STATE_PATH_LEGACY.unlink(missing_ok=True)

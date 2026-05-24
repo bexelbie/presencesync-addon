@@ -1,4 +1,9 @@
-"""Wrapper around findmy.py — login, 2FA, and location fetching with persisted auth."""
+"""Wrapper around findmy.py — login, 2FA, and AirTag location fetching.
+
+Uses LocalAnisetteProvider (built into findmy.py) by default — no external
+anisette server needed. Falls back to RemoteAnisetteProvider if anisette_url
+is explicitly configured.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -7,16 +12,17 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from findmy import AsyncAppleAccount, FindMyAccessory, LoginState
-from findmy.reports.anisette import RemoteAnisetteProvider
+from findmy.reports.anisette import LocalAnisetteProvider, RemoteAnisetteProvider
 from findmy.plist import list_accessories
-from findmy import plist as _fm_plist  # for monkey-patching _DEFAULT_SEARCH_PATH
+from findmy import plist as _fm_plist
 
 from . import state
 
 log = logging.getLogger(__name__)
+
+ANISETTE_LIBS_PATH = state.DATA_DIR / "anisette-libs"
 
 
 @dataclass
@@ -31,57 +37,48 @@ class LocationFix:
 
 
 class AppleClient:
-    """Owns the AsyncAppleAccount + the loaded OwnedBeacons. Tracks login state."""
+    """Owns the AsyncAppleAccount + loaded AirTag accessories."""
 
     def __init__(self):
         self.account: AsyncAppleAccount | None = None
-        self.anisette: RemoteAnisetteProvider | None = None
+        self.anisette = None
         self.accessories: list[FindMyAccessory] = []
         self.beaconstore_key: bytes | None = None
-        self._pending_2fa: object | None = None  # AsyncTrustedDeviceSecondFactor or AsyncSmsSecondFactor
+        self._pending_2fa = None
         self.last_login_state: LoginState = LoginState.LOGGED_OUT
 
+    def _make_anisette(self):
+        """Create the appropriate anisette provider."""
+        url = state.get().apple.anisette_url
+        if url:
+            log.info("Using remote anisette: %s", url)
+            return RemoteAnisetteProvider(url)
+        ANISETTE_LIBS_PATH.mkdir(parents=True, exist_ok=True)
+        log.info("Using local anisette (libs cached at %s)", ANISETTE_LIBS_PATH)
+        return LocalAnisetteProvider(libs_path=ANISETTE_LIBS_PATH)
+
     async def ensure_account(self) -> None:
-        """Create the AsyncAppleAccount if not already, attaching the anisette provider."""
+        """Create the AsyncAppleAccount if not already initialized."""
         if self.account is not None:
             return
-        anisette_url = state.get().apple.anisette_url or os.environ.get("PRESENCESYNC_ANISETTE_URL", "")
-        if not anisette_url:
-            raise RuntimeError("anisette_url is not configured")
-        self.anisette = RemoteAnisetteProvider(anisette_url)
-        # Try to resume from persisted state. findmy.AsyncAppleAccount in 0.10
-        # uses underscore-prefixed private fields (no AccountStateMapping export).
-        # We saved a filtered subset of __dict__; restore by setattr.
-        saved = state.load_apple_state()
-        if saved is None:
-            log.info("apple_state: no saved state found — fresh account")
-        elif isinstance(saved, dict):
-            log.info("apple_state: loaded blob — top-level keys: %s", list(saved.keys()))
-        else:
-            log.warning("apple_state: loaded non-dict (%s); discarding", type(saved).__name__)
-            state.clear_apple_state()
-            saved = None
+        self.anisette = self._make_anisette()
 
-        # Always create a fresh AsyncAppleAccount bound to the current event loop;
-        # we'll then patch the saved attributes on top of it.
+        saved = state.load_apple_state()
         self.account = AsyncAppleAccount(anisette=self.anisette)
 
         if isinstance(saved, dict):
-            # Only restore identity + auth state. Don't restore transient resources
-            # like _loop, _http, _closed, _reports, _anisette — those need to be
-            # rebuilt against the current event loop / aiohttp session.
             RESTORABLE = {"_uid", "_devid", "_username", "_password",
                           "_login_state", "_login_state_data", "_account_info"}
-            applied: list[str] = []
+            applied = []
             for k, v in saved.items():
                 if k in RESTORABLE:
                     try:
                         setattr(self.account, k, v)
                         applied.append(k)
                     except Exception:
-                        log.debug("apple_state: setattr %s failed", k)
+                        pass
             self.last_login_state = self.account.login_state
-            log.info("Resumed Apple account — restored %d fields, login_state=%s",
+            log.info("Resumed Apple account — restored %d fields, state=%s",
                      len(applied), self.last_login_state)
 
     async def login(self, username: str, password: str) -> LoginState:
@@ -115,13 +112,7 @@ class AppleClient:
         return result
 
     def load_bundle(self, bundle_dir: Path) -> None:
-        """Decrypt BeaconStore.key and load all FindMyAccessory objects via findmy.plist.
-
-        AirTags use rolling keys (the advertised public key rotates ~every 15 min),
-        derived from a master key + shared secret. FindMyAccessory wraps that
-        rolling-key derivation; passing it to fetch_location lets findmy.py
-        figure out which historical keys to query Apple's gateway for.
-        """
+        """Load AirTag accessories from extracted bundle directory."""
         bs_path = bundle_dir / "BeaconStore.key"
         if not bs_path.exists():
             raise FileNotFoundError(f"BeaconStore.key missing in {bundle_dir}")
@@ -129,29 +120,15 @@ class AppleClient:
         if len(self.beaconstore_key) != 32:
             raise ValueError(f"BeaconStore.key is {len(self.beaconstore_key)}B, expected 32")
 
-        # macOS tar pollutes bundles with AppleDouble `._*` sidecars holding
-        # extended attributes. findmy.plist.list_accessories doesn't filter
-        # them and chokes when it tries to parse one as a plist. Strip them
-        # before letting findmy walk the tree.
-        sidecars = [p for p in bundle_dir.rglob("._*") if p.is_file()]
-        for p in sidecars:
-            p.unlink(missing_ok=True)
-        if sidecars:
-            log.info("Removed %d AppleDouble sidecar(s) before findmy.list_accessories", len(sidecars))
+        # Remove macOS AppleDouble sidecars that confuse findmy's plist parser
+        for p in bundle_dir.rglob("._*"):
+            if p.is_file():
+                p.unlink(missing_ok=True)
 
-        # findmy expects the bundle to look like ~/Library/com.apple.icloud.searchpartyd/
-        # i.e. OwnedBeacons/, BeaconNamingRecord/, KeyAlignmentRecords/ at the root.
-        # Our bundle.tar.gz lays them out exactly that way.
-        # findmy.plist.list_accessories has a bug: it accepts search_path but DOESN'T
-        # forward it to _get_accessory_name / _get_alignment_plist, which fall back
-        # to ~/Library/com.apple.icloud.searchpartyd (doesn't exist in this container).
-        # Monkey-patch _DEFAULT_SEARCH_PATH so the helpers find our bundle.
+        # Monkey-patch findmy's default search path to our bundle location
         _fm_plist._DEFAULT_SEARCH_PATH = bundle_dir
         self.accessories = list_accessories(key=self.beaconstore_key, search_path=bundle_dir)
         log.info("Loaded bundle: %d accessories", len(self.accessories))
-        for a in self.accessories:
-            j = a.to_json() if hasattr(a, "to_json") else {}
-            log.info("  - %s (%s) %s", j.get("name") or "?", j.get("model") or "?", j.get("identifier") or "?")
 
     async def fetch_locations(self) -> list[LocationFix]:
         if self.account is None or self.last_login_state != LoginState.LOGGED_IN:
@@ -159,86 +136,52 @@ class AppleClient:
         if not self.accessories:
             return []
 
-        # findmy.py processes RollingKeyPairSource accessories SERIALLY when given a
-        # list, and each one iterates ~7 days × 96 slots looking backwards for
-        # reports. Per-accessory time can be a minute or more for the very first
-        # fetch. Parallelize at our level and bound each accessory's time so a
-        # single slow one doesn't block the whole tick.
         sem = asyncio.Semaphore(8)
-        per_accessory_timeout = 90  # seconds
+        timeout_per = 90
 
         async def _one(acc):
             async with sem:
-                acc_name = getattr(acc, "name", None) or (
-                    acc.to_json().get("name") if hasattr(acc, "to_json") else None
-                ) or "?"
-                t_start = time.time()
                 try:
                     report = await asyncio.wait_for(
-                        self.account.fetch_location(acc),
-                        timeout=per_accessory_timeout,
+                        self.account.fetch_location(acc), timeout=timeout_per
                     )
-                    log.info("  fetch %s done in %.1fs → %s",
-                             acc_name, time.time() - t_start,
-                             "report" if report is not None else "no report")
                     return acc, report
-                except asyncio.TimeoutError:
-                    log.warning("  fetch %s TIMED OUT after %ds — skipping this cycle",
-                                acc_name, per_accessory_timeout)
-                    return acc, None
-                except Exception as err:
-                    log.warning("  fetch %s FAILED: %s: %s",
-                                acc_name, type(err).__name__, err)
+                except (asyncio.TimeoutError, Exception) as e:
+                    log.warning("fetch %s failed: %s", getattr(acc, "name", "?"), e)
                     return acc, None
 
-        t0 = time.time()
-        log.info("starting parallel fetch of %d accessories (sem=8, timeout=%ds each)",
-                 len(self.accessories), per_accessory_timeout)
-        tasks = [_one(a) for a in self.accessories]
-        results = await asyncio.gather(*tasks)
-        with_report = sum(1 for _, r in results if r is not None)
-        log.info("fetch_locations: %d/%d accessories returned a report in %.1fs",
-                 with_report, len(results), time.time() - t0)
-        self._persist()  # may include refreshed tokens
+        results = await asyncio.gather(*[_one(a) for a in self.accessories])
+        self._persist()
 
         out: list[LocationFix] = []
         for acc, report in results:
             if report is None:
                 continue
             j = acc.to_json() if hasattr(acc, "to_json") else {}
-            ident = j.get("identifier") or getattr(acc, "name", "unknown")
-            name = j.get("name") or ident
-            model = j.get("model")
             out.append(LocationFix(
-                identifier=ident,
-                name=name,
-                model=model,
+                identifier=j.get("identifier") or getattr(acc, "name", "unknown"),
+                name=j.get("name") or j.get("identifier") or "unknown",
+                model=j.get("model"),
                 latitude=float(report.latitude),
                 longitude=float(report.longitude),
                 horizontal_accuracy=float(report.horizontal_accuracy),
                 timestamp_unix=int(report.timestamp.timestamp()),
             ))
-        log.info("fetch_locations got %d location reports", len(out))
+        log.info("fetch_locations: %d/%d accessories reported", len(out), len(self.accessories))
         return out
 
     def _persist(self) -> None:
         if self.account is None:
             return
         try:
-            # findmy.py 0.10+ exposes the AccountStateMapping via a .state
-            # property or .export_state() — prefer that over __getstate__,
-            # which returns the full __dict__ with unpicklable bits like the
-            # running uvloop event loop and aiohttp internals.
             blob = None
-            for attr_name in ("state", "state_info", "to_state", "export_state",
-                              "get_state_mapping", "to_dict"):
+            for attr_name in ("state", "state_info", "export_state", "to_dict"):
                 attr = getattr(self.account, attr_name, None)
                 if attr is None:
                     continue
                 try:
                     blob = attr() if callable(attr) else attr
-                    if isinstance(blob, dict) and "ids" in blob:
-                        log.debug("apple_state: source = .%s (good shape)", attr_name)
+                    if isinstance(blob, dict):
                         break
                     blob = None
                 except Exception:
@@ -247,7 +190,6 @@ class AppleClient:
                 getstate = getattr(self.account, "__getstate__", None)
                 if callable(getstate):
                     blob = getstate()
-                    log.debug("apple_state: source = __getstate__ (will filter)")
             if blob is not None:
                 state.save_apple_state(blob)
         except Exception:

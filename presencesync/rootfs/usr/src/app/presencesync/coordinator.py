@@ -1,8 +1,8 @@
 """Background polling loops — Apple → MQTT.
 
 Two independent loops:
-- AirTag loop: slow cadence (default 10min), accelerates to 5min on movement
-- iDevice loop: fast cadence (default 60s), will be governed by tracker.py intelligence
+- AirTag loop: slow cadence (default 10min), accelerates on movement
+- iDevice loop: governed by tracker.py intelligence (battery/distance/stationary-aware)
 """
 from __future__ import annotations
 
@@ -12,8 +12,6 @@ import math
 import time
 
 from findmy import LoginState
-
-from pathlib import Path
 
 from . import state
 from .apple import AppleClient, LocationFix
@@ -201,7 +199,7 @@ class Coordinator:
         for tracker in self.tracker_mgr.stale_devices():
             log.warning("Device %s is stale (no fix for >%.1fh) — marking unavailable",
                         tracker.device_name, s.tracking.stale_threshold_hours)
-            self.mqtt.publish_unavailable(tracker.device_id, tracker.device_name)
+            self.mqtt.publish_unavailable(tracker.device_id)
 
     # ── Public API ───────────────────────────────────────────────────────────
 

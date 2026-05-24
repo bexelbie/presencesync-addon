@@ -1,4 +1,8 @@
-"""MQTT publisher with HA auto-discovery — one device_tracker per tracked item."""
+"""MQTT publisher with HA auto-discovery — one device_tracker per tracked item.
+
+Entity IDs use stable Apple identifiers (not device names) so renaming a device
+in Find My doesn't orphan the HA entity.
+"""
 from __future__ import annotations
 
 import json
@@ -19,8 +23,9 @@ _SLUG_RE = re.compile(r"[^a-z0-9_]+")
 
 
 def _slug(s: str) -> str:
-    s = (s or "").lower().replace(" ", "_")
-    return _SLUG_RE.sub("", s).strip("_") or "tracker"
+    """Sanitize a string into a valid HA object_id slug."""
+    s = (s or "").lower().replace(" ", "_").replace("-", "_")
+    return _SLUG_RE.sub("", s).strip("_") or "unknown"
 
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -68,17 +73,13 @@ class MqttPublisher:
         return self._connected.is_set()
 
     def _on_connect(self, client, _userdata, _flags, reason_code, _props):
-        # paho-mqtt 2.x passes a ReasonCode object — int() raises, must use
-        # .value (success == 0) or .is_failure.
         is_failure = getattr(reason_code, "is_failure", None)
         rc_int = getattr(reason_code, "value", reason_code)
         if (is_failure is False) or rc_int == 0:
             cfg = state.get().mqtt
             log.info("MQTT connected to %s:%s", cfg.host, cfg.port)
-            info = client.publish(self._availability_topic, "online", qos=1, retain=True)
-            log.info("publish %s='online' → rc=%s mid=%s",
-                     self._availability_topic, info.rc, info.mid)
-            self._published_discovery.clear()  # re-publish discovery on reconnect
+            client.publish(self._availability_topic, "online", qos=1, retain=True)
+            self._published_discovery.clear()
             self._connected.set()
             self._connect_failure_logged = False
         else:
@@ -92,19 +93,15 @@ class MqttPublisher:
 
     def _publish(self, topic: str, payload: str, *, retain: bool = True) -> None:
         if self._client is None:
-            log.debug("publish skipped: no client")
             return
         info = self._client.publish(topic, payload, qos=1, retain=retain)
         if info.rc != mqtt.MQTT_ERR_SUCCESS:
-            log.warning("publish %s rc=%s payload_len=%d", topic, info.rc, len(payload))
-        else:
-            log.debug("publish %s ok (mid=%s)", topic, info.mid)
+            log.warning("publish %s rc=%s", topic, info.rc)
 
     def publish_device_fix(self, d: DeviceFix) -> None:
-        """Family / owned-device location → MQTT. Same shape as publish_fix."""
+        """Family / owned-device location → MQTT."""
         if self._client is None or not self._connected.is_set():
             return
-        # Reuse LocationFix-shaped publishing — DeviceFix has the same essential fields
         as_fix = LocationFix(
             identifier=d.identifier,
             name=d.name,
@@ -115,12 +112,10 @@ class MqttPublisher:
             timestamp_unix=d.timestamp_unix,
         )
         self.publish_fix(as_fix)
-        # Battery sensor for devices (level percentage when available)
         if d.battery_level is not None:
             cfg = state.get().mqtt
-            obj = f"presencesync_{_slug(d.name)}"
+            obj = f"presencesync_{_slug(d.identifier)}"
             self._publish(f"{cfg.state_prefix}/{obj}/battery", str(int(d.battery_level * 100)))
-            # Publish battery sensor discovery if not already done
             battery_key = f"{obj}_battery"
             if battery_key not in self._published_discovery:
                 self._publish_battery_discovery(obj, d, cfg)
@@ -128,18 +123,16 @@ class MqttPublisher:
 
     def publish_fix(self, fix: LocationFix) -> None:
         if self._client is None or not self._connected.is_set():
-            log.warning("publish_fix(%s) skipped: client=%s connected=%s",
-                        fix.name, self._client is not None, self._connected.is_set())
             return
         cfg = state.get().mqtt
         home = state.get().home
 
-        obj = f"presencesync_{_slug(fix.name)}"
+        # Use stable Apple identifier for entity ID (survives device renames)
+        obj = f"presencesync_{_slug(fix.identifier)}"
         if obj not in self._published_discovery:
             self._publish_discovery(obj, fix, cfg)
             self._published_discovery.add(obj)
 
-        # State + attributes
         d = _haversine_m(fix.latitude, fix.longitude, home.latitude, home.longitude) if home.latitude else float("inf")
         state_val = "home" if d <= home.radius_m else "not_home"
         attrs = {
@@ -147,6 +140,7 @@ class MqttPublisher:
             "longitude": fix.longitude,
             "gps_accuracy": fix.horizontal_accuracy,
             "last_seen": fix.timestamp_unix,
+            "friendly_name": fix.name,
             "model": fix.model or "",
             "source": "presencesync",
         }
@@ -155,7 +149,7 @@ class MqttPublisher:
 
     def _publish_discovery(self, obj: str, fix: LocationFix, cfg) -> None:
         device = {
-            "identifiers": [obj],
+            "identifiers": [f"presencesync_{fix.identifier}"],
             "name": fix.name,
             "manufacturer": "Apple",
             "model": fix.model or "Find My Item",
@@ -164,6 +158,7 @@ class MqttPublisher:
         tracker_cfg = {
             "name": None,
             "unique_id": obj,
+            "object_id": obj,
             "state_topic": f"{cfg.state_prefix}/{obj}/state",
             "json_attributes_topic": f"{cfg.state_prefix}/{obj}/attributes",
             "source_type": "gps",
@@ -174,12 +169,11 @@ class MqttPublisher:
         }
         topic = f"{cfg.discovery_prefix}/device_tracker/{obj}/config"
         self._publish(topic, json.dumps(tracker_cfg))
-        log.info("Discovery published: %s → %s", obj, topic)
+        log.info("Discovery: %s (%s)", fix.name, obj)
 
     def _publish_battery_discovery(self, obj: str, d: DeviceFix, cfg) -> None:
-        """Publish HA MQTT discovery for a battery sensor entity."""
         device = {
-            "identifiers": [obj],
+            "identifiers": [f"presencesync_{d.identifier}"],
             "name": d.name,
             "manufacturer": "Apple",
             "model": d.model or "Apple Device",
@@ -197,15 +191,14 @@ class MqttPublisher:
         }
         topic = f"{cfg.discovery_prefix}/sensor/{obj}_battery/config"
         self._publish(topic, json.dumps(sensor_cfg))
-        log.info("Battery discovery published: %s → %s", obj, topic)
+        log.info("Battery discovery: %s", d.name)
 
-    def publish_unavailable(self, device_id: str, device_name: str) -> None:
+    def publish_unavailable(self, device_id: str) -> None:
         """Mark a device as unavailable (stale/offline)."""
         if self._client is None or not self._connected.is_set():
             return
         cfg = state.get().mqtt
-        obj = f"presencesync_{_slug(device_name)}"
-        # Publish per-device availability as offline
+        obj = f"presencesync_{_slug(device_id)}"
         self._publish(f"{cfg.state_prefix}/{obj}/state", "unavailable")
 
     def stop(self) -> None:
