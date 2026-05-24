@@ -58,7 +58,7 @@ serde_json = "1"
 EOF
 
 # Build release binary
-RUN cargo build --release 2>&1 | tail -5 \
+RUN cargo build --release \
     && cp target/release/export-findmy /usr/local/bin/export-findmy \
     && strip /usr/local/bin/export-findmy
 
