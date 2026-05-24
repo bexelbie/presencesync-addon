@@ -7,6 +7,9 @@ ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-debian:bookworm
 # ─── Stage 1: Rust builder ───────────────────────────────────────────────────
 FROM rust:1.86-bookworm AS rust-builder
 
+# Install nightly toolchain (needed for latest crate MSRVs)
+RUN rustup toolchain install nightly && rustup default nightly
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
