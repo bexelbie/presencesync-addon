@@ -72,7 +72,7 @@ ENV LANG=C.UTF-8 \
 # Install Python + runtime deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-venv \
-        ca-certificates curl jq tzdata \
+        ca-certificates curl git jq tzdata \
         libssl3 zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
