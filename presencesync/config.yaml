@@ -1,5 +1,5 @@
 name: PresenceSync
-version: "0.5.0"
+version: "0.6.0"
 slug: presencesync
 description: Track Apple AirTags (owned + shared), iPhones, iPads, Macs, and Apple Watches in Home Assistant via Find My.
 image: ghcr.io/bexelbie/presencesync-{arch}
@@ -27,11 +27,21 @@ map:
   - share:rw
 options:
   log_level: info
-  mqtt_discovery_prefix: homeassistant
-  state_prefix: presencesync
-  anisette_url: ""
+  poll_interval: 300
+  refresh_interval: 1800
+  item_poll_interval: 600
+  stationary_radius: 50
+  unavailable_timeout: 86400
+  devices: []
 schema:
   log_level: list(debug|info|warning|error)
-  mqtt_discovery_prefix: str
-  state_prefix: str
-  anisette_url: str?
+  poll_interval: int(0,86400)
+  refresh_interval: int(0,86400)
+  item_poll_interval: int(0,86400)
+  stationary_radius: int(0,10000)
+  unavailable_timeout: int(0,604800)
+  devices:
+    - id: str
+      stationary_radius: int?
+      exclude: bool?
+      unavailable_timeout: int?

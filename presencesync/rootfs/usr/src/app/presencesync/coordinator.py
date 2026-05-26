@@ -1,261 +1,648 @@
-"""Background polling loops — Apple → MQTT.
-
-Two independent loops:
-- AirTag loop: slow cadence (default 10min), accelerates on movement
-  - Fetches both owned and shared accessories
-- iDevice loop: governed by tracker.py intelligence (battery/distance/stationary-aware)
-"""
+# ABOUTME: Coordinates fixed-interval Find My polling and item fetches and publishes results to MQTT.
+# ABOUTME: Applies stationary denoising, deduplicates beacon reports, and tracks device availability.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import time
+from pathlib import Path
 
 from findmy import LoginState
 
-from . import state
-from .apple import AppleClient, LocationFix
-from .icloud import ICloudClient
-from .mqtt import MqttPublisher
-from .tracker import TrackerManager, PublishAction
 from . import anisette_manager
+from . import identity
+from . import state
+from . import supervisor
+from .apple import AppleClient, LocationFix
+from .icloud import DeviceFix, ICloudClient
+from .mqtt import MqttPublisher
 
 log = logging.getLogger(__name__)
 
+KEYS_DIR = state.DATA_DIR / "keys"
+
+
+def _load_cloudkit_to_stable_map(metadata_dir: Path | None = None) -> dict[str, str]:
+    """Load metadata.json and map cloudkit_record_id to stable beacon identifier."""
+    meta_root = metadata_dir or Path(KEYS_DIR)
+    meta_path = meta_root / "metadata.json"
+    if not meta_path.exists():
+        return {}
+
+    try:
+        payload = json.loads(meta_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        log.exception("Failed to load %s", meta_path)
+        return {}
+
+    mapping: dict[str, str] = {}
+    for stable_id, record in (payload.get("beacon_records") or {}).items():
+        if not isinstance(record, dict):
+            continue
+        cloudkit_record_id = record.get("cloudkit_record_id") or ""
+        if cloudkit_record_id:
+            mapping[cloudkit_record_id] = stable_id
+    return mapping
+
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Great-circle distance in meters between two lat/lon points."""
-    r = 6371000.0
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp = math.radians(lat2 - lat1)
-    dl = math.radians(lon2 - lon1)
-    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    return 2 * r * math.asin(math.sqrt(a))
+    """Return the great-circle distance between two lat/lon pairs in meters."""
+    radius_m = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+    a = (
+        math.sin(delta_phi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+    )
+    return 2 * radius_m * math.asin(math.sqrt(a))
 
 
 class Coordinator:
-    """Singleton that holds the AppleClient + MqttPublisher and runs two poll loops."""
-
     def __init__(self):
         self.apple = AppleClient()
         self.icloud = ICloudClient()
         self.mqtt = MqttPublisher()
-        self.tracker_mgr = TrackerManager()
-        self.last_run_unix: int = 0
-        self.last_fixes: list = []          # AirTags + accessories (LocationFix)
-        self.last_device_fixes: list = []   # iPhones / iPads / Macs / Watches (DeviceFix)
-        self._airtag_task: asyncio.Task | None = None
-        self._idevice_task: asyncio.Task | None = None
-        self._stop_event = asyncio.Event()
 
-        # Per-AirTag last-known positions for movement detection
-        self._airtag_last_pos: dict[str, tuple[float, float]] = {}
+        self.last_run_unix: int = 0
+        self.last_fixes: list[LocationFix] = []
+        self.last_device_fixes: list[DeviceFix] = []
+
+        self._anchors: dict[str, tuple[float, float]] = {}
+        self._last_seen: dict[str, int] = {}
+        self._availability: dict[str, bool] = {}
+
+        self._fmi_ts_by_beacon_id: dict[str, int] = {}
+        self._fmi_id_by_beacon_id: dict[str, str] = {}
+        self._raw_icloud_ids_by_device_id: dict[str, str] = {}
+        self._published_timestamps: dict[str, int] = {}
+        self._metadata_dir: Path = Path(KEYS_DIR)
+        self._ck_to_stable = _load_cloudkit_to_stable_map(self._metadata_dir)
+
+        self._poll_task: asyncio.Task | None = None
+        self._refresh_task: asyncio.Task | None = None
+        self._item_task: asyncio.Task | None = None
+        self._command_tasks: set[asyncio.Task] = set()
+        self._stop_event = asyncio.Event()
+        self._device_lock = asyncio.Lock()
+        self._item_lock = asyncio.Lock()
+
+        self._icloud_consecutive_failures = 0
+        self._icloud_ctx_reset_interval = 2 * 3600
+        self._icloud_last_ctx_reset = 0.0
 
     async def start(self):
-        if self._airtag_task is not None or self._idevice_task is not None:
+        if any(task is not None and not task.done() for task in (self._poll_task, self._refresh_task, self._item_task)):
             return
-        self._stop_event.clear()
-        self.mqtt.configure()
 
-        # Start anisette server
+        self._stop_event.clear()
+
+        await self._auto_discover_mqtt()
+        self._connect_mqtt()
+        await self._wait_for_mqtt_connection()
+        self._subscribe_commands()
+        self._publish_hub_discovery()
+
         mgr = anisette_manager.get()
         if not await mgr.ensure_running():
-            log.warning("Anisette server not available — AirTag fetch will fail")
+            log.warning("Anisette server not available")
 
         try:
             await self.apple.ensure_account()
         except Exception:
-            log.exception("apple.ensure_account failed; will retry in poll loop")
+            log.exception("apple.ensure_account failed")
 
-        # Auto-load keys from /data/keys/ (output of export-findmy)
-        try:
-            self.apple.load_keys_dir()
-        except Exception:
-            log.debug("No keys in /data/keys/ yet")
+        self._load_item_keys()
+        self._reload_cloudkit_mapping()
+        await self._resume_icloud_session()
 
-        # Also try legacy bundle directory
-        if state.get().bundle_uploaded:
-            try:
-                self.apple.load_bundle(state.BUNDLE_DIR)
-            except Exception:
-                log.exception("Failed to auto-reload bundle from %s", state.BUNDLE_DIR)
+        await self._do_refresh()
+        await self._do_fetch_items()
+        identity.get().log_device_table()
 
-        # Auto-resume the pyicloud session from saved cookies.
-        s = state.get()
-        if s.tracking.include_devices and s.apple.username and s.apple.password:
-            log.info("icloud: attempting auto-resume from saved cookies")
-            try:
-                ic_state = await asyncio.get_event_loop().run_in_executor(
-                    None, self.icloud.login, s.apple.username, s.apple.password
-                )
-                log.info("icloud auto-resume: %s", ic_state)
-            except Exception:
-                log.exception("icloud auto-resume failed (will need fresh login)")
-
-        self._airtag_task = asyncio.create_task(self._run_airtag_loop())
-        self._idevice_task = asyncio.create_task(self._run_idevice_loop())
-
-    # ── AirTag Loop ──────────────────────────────────────────────────────────
-
-    async def _run_airtag_loop(self):
-        """Poll AirTags on a slow cadence, accelerating on movement."""
-        while not self._stop_event.is_set():
-            movement_detected = False
-            try:
-                movement_detected = await self._tick_airtags()
-            except Exception:
-                log.exception("AirTag poll tick raised")
-
-            s = state.get().tracking
-            if movement_detected:
-                interval = max(60, s.airtag_movement_interval_s)
-                log.info("AirTag movement detected → next poll in %ds", interval)
-            else:
-                interval = max(60, s.airtag_poll_interval_s)
-
-            try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
-                break
-            except asyncio.TimeoutError:
-                pass
-
-    async def _tick_airtags(self) -> bool:
-        """Fetch AirTag locations (owned + shared). Returns True if movement detected."""
-        s = state.get()
-        if not s.tracking.include_airtags:
-            log.debug("AirTag fetch skipped: include_airtags=False")
-            self.last_fixes = []
-            return False
-
-        has_owned = bool(self.apple.accessories)
-        has_shared = bool(self.apple.shared_accessories)
-        logged_in = self.apple.last_login_state == LoginState.LOGGED_IN
-
-        if not logged_in:
-            log.debug("AirTag fetch skipped: not logged in (state=%s)", self.apple.last_login_state)
-            return False
-
-        if not has_owned and not has_shared:
-            log.debug("AirTag fetch skipped: no accessories loaded")
-            return False
-
-        fixes: list[LocationFix] = []
-
-        # Fetch owned accessories via FindMy.py
-        if has_owned:
-            log.info("airtag tick: fetching %d owned accessories", len(self.apple.accessories))
-            owned_fixes = await self.apple.fetch_locations()
-            fixes.extend(owned_fixes)
-
-        # Fetch shared accessories via custom sharedFetch
-        if has_shared:
-            log.info("airtag tick: fetching %d shared accessories", len(self.apple.shared_accessories))
-            shared_fixes = await self.apple.fetch_shared_location_fixes()
-            fixes.extend(shared_fixes)
-
-        self.last_fixes = fixes
-        self.last_run_unix = int(time.time())
-
-        movement_detected = False
-        threshold = s.tracking.airtag_movement_threshold_m
-
-        for fix in fixes:
-            try:
-                self.mqtt.publish_fix(fix)
-            except Exception:
-                log.exception("mqtt publish failed for %s", fix.name)
-
-            # Movement detection
-            prev = self._airtag_last_pos.get(fix.identifier)
-            if prev is not None:
-                dist = _haversine_m(prev[0], prev[1], fix.latitude, fix.longitude)
-                if dist > max(threshold, fix.horizontal_accuracy):
-                    log.info("AirTag %s moved %.0fm (threshold %.0fm)",
-                             fix.name, dist, threshold)
-                    movement_detected = True
-            self._airtag_last_pos[fix.identifier] = (fix.latitude, fix.longitude)
-
-        return movement_detected
-
-    # ── iDevice Loop ─────────────────────────────────────────────────────────
-
-    async def _run_idevice_loop(self):
-        """Poll iDevices with dynamic intervals governed by tracker intelligence."""
-        while not self._stop_event.is_set():
-            try:
-                await self._tick_idevices()
-            except Exception:
-                log.exception("iDevice poll tick raised")
-
-            # Dynamic interval from tracker (min across all devices)
-            interval = self.tracker_mgr.next_poll_seconds()
-            log.debug("iDevice loop: next poll in %ds", interval)
-            try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
-                break
-            except asyncio.TimeoutError:
-                pass
-
-    async def _tick_idevices(self):
-        """Fetch iDevice locations via pyicloud, filtered through tracker intelligence."""
-        s = state.get()
-        if not s.tracking.include_devices:
-            log.debug("iCloud device fetch skipped: include_devices=False")
-            self.last_device_fixes = []
-            return
-
-        if self.icloud.login_state != "logged_in":
-            log.debug("iCloud fetch skipped: state=%s", self.icloud.login_state)
-            return
-
-        log.info("idevice tick: fetching iCloud devices")
-        # pyicloud is sync — run in thread pool to keep async loop responsive
-        device_fixes = await asyncio.get_event_loop().run_in_executor(
-            None, self.icloud.fetch_devices
-        )
-        self.last_device_fixes = device_fixes
-        self.last_run_unix = int(time.time())
-
-        for d in device_fixes:
-            decision = self.tracker_mgr.ingest(d)
-            if decision.action == PublishAction.PUBLISH:
-                try:
-                    self.mqtt.publish_device_fix(d)
-                except Exception:
-                    log.exception("mqtt publish failed for device %s", d.name)
-            elif decision.action == PublishAction.SUPPRESS:
-                log.debug("Suppressed state flip for %s (flap protection)", d.name)
-
-        # Check for stale devices and mark unavailable
-        for tracker in self.tracker_mgr.stale_devices():
-            log.warning("Device %s is stale (no fix for >%.1fh) — marking unavailable",
-                        tracker.device_name, s.tracking.stale_threshold_hours)
-            self.mqtt.publish_unavailable(tracker.device_id)
-
-    # ── Public API ───────────────────────────────────────────────────────────
-
-    async def poll_now(self):
-        """Trigger immediate poll of both loops (called by /api/poll-now)."""
-        tasks = []
-        if state.get().tracking.include_airtags:
-            tasks.append(self._tick_airtags())
-        if state.get().tracking.include_devices:
-            tasks.append(self._tick_idevices())
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def reload_mqtt(self):
-        self.mqtt.configure()
+        self._poll_task = self._create_loop_task(self._poll_loop(), "poll")
+        self._refresh_task = self._create_loop_task(self._refresh_loop(), "refresh")
+        self._item_task = self._create_loop_task(self._item_loop(), "items")
 
     async def stop(self):
         self._stop_event.set()
-        for task in (self._airtag_task, self._idevice_task):
-            if task:
-                await task
-        self._airtag_task = None
-        self._idevice_task = None
+
+        tasks = [task for task in (self._poll_task, self._refresh_task, self._item_task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        self._poll_task = None
+        self._refresh_task = None
+        self._item_task = None
+
+        for task in list(self._command_tasks):
+            task.cancel()
+        if self._command_tasks:
+            await asyncio.gather(*list(self._command_tasks), return_exceptions=True)
+        self._command_tasks.clear()
+
         self.mqtt.stop()
+
+    async def _poll_loop(self):
+        while not self._stop_event.is_set():
+            interval = int(state.get_addon_config().poll_interval)
+            if interval <= 0:
+                return
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
+                return
+            except asyncio.TimeoutError:
+                await self._do_poll()
+
+    async def _refresh_loop(self):
+        while not self._stop_event.is_set():
+            interval = int(state.get_addon_config().refresh_interval)
+            if interval <= 0:
+                return
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
+                return
+            except asyncio.TimeoutError:
+                await self._do_refresh()
+
+    async def _item_loop(self):
+        while not self._stop_event.is_set():
+            interval = int(state.get_addon_config().item_poll_interval)
+            if interval <= 0:
+                return
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
+                return
+            except asyncio.TimeoutError:
+                await self._do_fetch_items()
+
+    async def _do_poll(self):
+        async with self._device_lock:
+            self._reload_cloudkit_mapping()
+            if not await self._ensure_icloud_session():
+                self.last_device_fixes = []
+                await self._publish_unavailable_devices()
+                return
+
+            try:
+                device_fixes = await asyncio.get_event_loop().run_in_executor(
+                    None, self.icloud.poll_devices
+                )
+                self._icloud_consecutive_failures = 0
+            except Exception:
+                await self._handle_icloud_failure("poll")
+                return
+
+            self.last_device_fixes = device_fixes
+            self.last_run_unix = int(time.time())
+            for device_fix in device_fixes:
+                await self._process_idevice(device_fix)
+            await self._publish_unavailable_devices()
+
+    async def _do_refresh(self):
+        async with self._device_lock:
+            self._reload_cloudkit_mapping()
+            if not await self._ensure_icloud_session():
+                self.last_device_fixes = []
+                await self._publish_unavailable_devices()
+                return
+
+            try:
+                self._maybe_reset_icloud_server_context()
+                device_fixes = await asyncio.get_event_loop().run_in_executor(
+                    None, self.icloud.refresh_devices
+                )
+                self._icloud_consecutive_failures = 0
+            except Exception:
+                await self._handle_icloud_failure("refresh")
+                return
+
+            self.last_device_fixes = device_fixes
+            self.last_run_unix = int(time.time())
+            for device_fix in device_fixes:
+                await self._process_idevice(device_fix)
+            await self._publish_unavailable_devices()
+
+    async def _do_fetch_items(self):
+        async with self._item_lock:
+            self._reload_cloudkit_mapping()
+            if self.apple.last_login_state != LoginState.LOGGED_IN:
+                self.last_fixes = []
+                await self._publish_unavailable_devices()
+                return
+            if not self.apple.accessories and not self.apple.shared_accessories:
+                self.last_fixes = []
+                await self._publish_unavailable_devices()
+                return
+
+            fixes: list[LocationFix] = []
+            try:
+                if self.apple.accessories:
+                    fixes.extend(await self.apple.fetch_locations())
+                if self.apple.shared_accessories:
+                    fixes.extend(await self.apple.fetch_shared_location_fixes())
+            except Exception:
+                log.exception("Item fetch failed")
+                await self._publish_unavailable_devices()
+                return
+
+            self.last_fixes = fixes
+            self.last_run_unix = int(time.time())
+            for fix in fixes:
+                await self._process_item(fix)
+            await self._publish_unavailable_devices()
+
+    async def _process_idevice(self, d: DeviceFix):
+        store = identity.get()
+        config = state.get_addon_config()
+        device_id = store.register(d.identifier, d.name, "fmip")
+        if store.is_excluded(device_id, config.devices):
+            return
+
+        self._raw_icloud_ids_by_device_id[device_id] = d.identifier
+
+        if d.ba_uuid:
+            beacon_id = self._ck_to_stable.get(d.ba_uuid)
+            if beacon_id:
+                self._fmi_ts_by_beacon_id[beacon_id] = max(
+                    self._fmi_ts_by_beacon_id.get(beacon_id, 0),
+                    d.timestamp_unix,
+                )
+                self._fmi_id_by_beacon_id[beacon_id] = d.identifier
+
+        if d.timestamp_unix <= self._published_timestamps.get(device_id, 0):
+            return
+
+        lat, lon = self._apply_stationary(device_id, d.latitude, d.longitude)
+        attrs = {
+            "latitude": lat,
+            "longitude": lon,
+            "gps_accuracy": d.horizontal_accuracy,
+            "last_seen": d.timestamp_unix,
+            "friendly_name": d.name,
+            "model": d.model or "",
+            "source": "presencesync",
+        }
+        if d.owner:
+            attrs["owner"] = d.owner
+
+        self._publish_device_discovery(
+            device_id=device_id,
+            name=d.name,
+            model=d.model,
+            has_battery=d.battery_level is not None,
+            has_play_sound=True,
+        )
+        self._publish_location(device_id, attrs, source_fix=d)
+        if d.battery_level is not None:
+            self._publish_battery(device_id, int(d.battery_level * 100))
+
+        self._published_timestamps[device_id] = max(
+            self._published_timestamps.get(device_id, 0),
+            d.timestamp_unix,
+        )
+        self._last_seen[device_id] = max(self._last_seen.get(device_id, 0), d.timestamp_unix)
+        self._set_availability(device_id, True, force=True)
+
+    async def _process_item(self, fix: LocationFix):
+        store = identity.get()
+        config = state.get_addon_config()
+        ident = fix.identifier or ""
+        is_idevice_beacon = ident.startswith("l:/") or ident.startswith("me:/")
+
+        if is_idevice_beacon:
+            fmi_ts = self._fmi_ts_by_beacon_id.get(ident, 0)
+            if fmi_ts >= fix.timestamp_unix:
+                return
+            fmi_id = self._fmi_id_by_beacon_id.get(ident)
+            if fmi_id:
+                device_id = store.get_hash(fmi_id)
+            else:
+                device_id = store.register(ident, fix.name, "item_beacon")
+        else:
+            device_id = store.register(ident, fix.name, "item")
+
+        if store.is_excluded(device_id, config.devices):
+            return
+        if fix.timestamp_unix <= self._published_timestamps.get(device_id, 0):
+            return
+
+        lat, lon = self._apply_stationary(device_id, fix.latitude, fix.longitude)
+        attrs = {
+            "latitude": lat,
+            "longitude": lon,
+            "gps_accuracy": fix.horizontal_accuracy,
+            "last_seen": fix.timestamp_unix,
+            "friendly_name": fix.name,
+            "model": fix.model or "Find My Item",
+            "source": "presencesync",
+        }
+        if fix.shared_by:
+            attrs["owner"] = fix.shared_by
+        if fix.shared_date:
+            attrs["shared_date"] = fix.shared_date
+
+        self._publish_device_discovery(
+            device_id=device_id,
+            name=fix.name,
+            model=fix.model,
+            has_battery=False,
+            has_play_sound=False,
+        )
+        self._publish_location(device_id, attrs, source_fix=fix)
+
+        self._published_timestamps[device_id] = max(
+            self._published_timestamps.get(device_id, 0),
+            fix.timestamp_unix,
+        )
+        self._last_seen[device_id] = max(self._last_seen.get(device_id, 0), fix.timestamp_unix)
+        self._set_availability(device_id, True, force=True)
+
+    def _apply_stationary(self, device_id: str, lat: float, lon: float) -> tuple[float, float]:
+        """Return anchor coordinates while the device stays within its stationary radius."""
+        addon_config = state.get_addon_config()
+        radius = identity.get().get_stationary_radius(
+            device_id,
+            addon_config.devices,
+            addon_config.stationary_radius,
+        )
+        if radius == 0:
+            return (lat, lon)
+
+        anchor = self._anchors.get(device_id)
+        if anchor is None:
+            self._anchors[device_id] = (lat, lon)
+            return (lat, lon)
+
+        distance = _haversine_m(lat, lon, anchor[0], anchor[1])
+        if distance <= radius:
+            return anchor
+
+        self._anchors[device_id] = (lat, lon)
+        return (lat, lon)
+
+    async def _publish_unavailable_devices(self):
+        now_unix = int(time.time())
+        store = identity.get()
+        addon_config = state.get_addon_config()
+        known_device_ids = set(store.known_device_ids()) | set(self._last_seen.keys())
+        for device_id in known_device_ids:
+            timeout = store.get_unavailable_timeout(
+                device_id,
+                addon_config.devices,
+                addon_config.unavailable_timeout,
+            )
+            if timeout <= 0:
+                continue
+            last_seen = self._last_seen.get(device_id, 0)
+            if now_unix - last_seen > timeout:
+                self._set_availability(device_id, False)
+
+    async def _do_play_sound(self, device_id: str):
+        raw_device_id = self._raw_icloud_ids_by_device_id.get(device_id, device_id)
+        try:
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.icloud.play_sound(raw_device_id, "Find My iPhone Alert"),
+            )
+        except Exception:
+            log.exception("play_sound failed for %s", raw_device_id)
+
+    async def poll_now(self):
+        await self._do_poll()
+        await self._do_fetch_items()
+
+    async def reload_mqtt(self):
+        self._connect_mqtt()
+        await self._wait_for_mqtt_connection()
+        self._subscribe_commands()
+        self._publish_hub_discovery()
+
+    async def _auto_discover_mqtt(self):
+        mqtt_info = await supervisor.discover_mqtt()
+        if mqtt_info is None:
+            return
+
+        await state.update(
+            lambda s: (
+                setattr(s.mqtt, "host", mqtt_info.host),
+                setattr(s.mqtt, "port", mqtt_info.port),
+                setattr(s.mqtt, "username", mqtt_info.username),
+                setattr(s.mqtt, "password", mqtt_info.password),
+            )
+        )
+
+    def _load_item_keys(self):
+        keys_loaded = False
+        try:
+            self.apple.load_keys_dir()
+            keys_loaded = bool(self.apple.accessories or self.apple.shared_accessories)
+            if keys_loaded:
+                self._metadata_dir = Path(KEYS_DIR)
+        except Exception:
+            log.debug("No keys available in %s", KEYS_DIR, exc_info=True)
+
+        if not keys_loaded and state.get().bundle_uploaded:
+            try:
+                self.apple.load_bundle(state.BUNDLE_DIR)
+                self._metadata_dir = state.BUNDLE_DIR
+            except Exception:
+                log.exception("Failed to auto-load bundle from %s", state.BUNDLE_DIR)
+
+    async def _resume_icloud_session(self):
+        settings = state.get()
+        if not settings.apple.username or not settings.apple.password:
+            return
+        try:
+            login_state = await asyncio.get_event_loop().run_in_executor(
+                None,
+                self.icloud.login,
+                settings.apple.username,
+                settings.apple.password,
+            )
+            log.info("icloud auto-resume: %s", login_state)
+        except Exception:
+            log.exception("icloud auto-resume failed")
+
+    def _reload_cloudkit_mapping(self):
+        self._ck_to_stable = _load_cloudkit_to_stable_map(self._metadata_dir)
+
+    async def _ensure_icloud_session(self) -> bool:
+        if self.icloud.login_state == "logged_in":
+            return True
+
+        settings = state.get()
+        if not settings.apple.username or not settings.apple.password:
+            return False
+
+        try:
+            login_state = await asyncio.get_event_loop().run_in_executor(
+                None,
+                self.icloud.login,
+                settings.apple.username,
+                settings.apple.password,
+            )
+            log.info("icloud session restore: %s", login_state)
+        except Exception:
+            log.exception("icloud session restore failed")
+            return False
+        return self.icloud.login_state == "logged_in"
+
+    async def _handle_icloud_failure(self, operation: str):
+        self._icloud_consecutive_failures += 1
+        log.exception("iCloud %s failed", operation)
+        if self._icloud_consecutive_failures < 3:
+            return
+
+        settings = state.get()
+        if not settings.apple.username or not settings.apple.password:
+            log.warning("Skipping iCloud recovery; no stored credentials")
+            return
+
+        try:
+            login_state = await asyncio.get_event_loop().run_in_executor(
+                None,
+                self.icloud.login,
+                settings.apple.username,
+                settings.apple.password,
+            )
+            log.info("iCloud session recovery: %s", login_state)
+            if login_state == "logged_in":
+                self._icloud_consecutive_failures = 0
+        except Exception:
+            log.exception("iCloud session recovery failed")
+
+    def _maybe_reset_icloud_server_context(self):
+        now = time.time()
+        if now - self._icloud_last_ctx_reset < self._icloud_ctx_reset_interval:
+            return
+        self.icloud.reset_server_context()
+        self._icloud_last_ctx_reset = now
+
+    def _connect_mqtt(self):
+        if hasattr(self.mqtt, "connect"):
+            self.mqtt.connect()
+            return
+        if hasattr(self.mqtt, "configure"):
+            self.mqtt.configure()
+
+    async def _wait_for_mqtt_connection(self, timeout: float = 10.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.mqtt.connected:
+                return
+            await asyncio.sleep(0.1)
+        log.warning("MQTT not connected after %.1fs", timeout)
+
+    def _subscribe_commands(self):
+        callbacks = {
+            "poll": lambda: self._schedule(self._do_poll()),
+            "refresh": lambda: self._schedule(self._do_refresh()),
+            "fetch_items": lambda: self._schedule(self._do_fetch_items()),
+            "play_sound": lambda device_id: self._schedule(self._do_play_sound(device_id)),
+        }
+        if hasattr(self.mqtt, "subscribe_commands"):
+            self.mqtt.subscribe_commands(callbacks)
+            return
+        if hasattr(self.mqtt, "set_play_sound_callback"):
+            self.mqtt.set_play_sound_callback(lambda device_id: callbacks["play_sound"](device_id))
+
+    def _publish_hub_discovery(self):
+        if hasattr(self.mqtt, "publish_hub_discovery"):
+            self.mqtt.publish_hub_discovery()
+
+    def _publish_device_discovery(
+        self,
+        *,
+        device_id: str,
+        name: str,
+        model: str | None,
+        has_battery: bool,
+        has_play_sound: bool,
+    ):
+        if hasattr(self.mqtt, "publish_device_discovery"):
+            self.mqtt.publish_device_discovery(device_id, name, model, has_battery, has_play_sound)
+
+    def _publish_location(self, device_id: str, attrs: dict, source_fix: DeviceFix | LocationFix):
+        if hasattr(self.mqtt, "publish_location"):
+            self.mqtt.publish_location(device_id, attrs)
+            return
+
+        if isinstance(source_fix, DeviceFix) and hasattr(self.mqtt, "publish_device_fix"):
+            compat_fix = DeviceFix(
+                identifier=device_id,
+                name=source_fix.name,
+                model=source_fix.model,
+                latitude=attrs["latitude"],
+                longitude=attrs["longitude"],
+                horizontal_accuracy=attrs["gps_accuracy"],
+                timestamp_unix=attrs["last_seen"],
+                battery_level=source_fix.battery_level,
+                battery_status=source_fix.battery_status,
+                device_class=source_fix.device_class,
+                ba_uuid=source_fix.ba_uuid,
+                owner=source_fix.owner,
+            )
+            self.mqtt.publish_device_fix(compat_fix)
+            return
+
+        if hasattr(self.mqtt, "publish_fix"):
+            compat_fix = LocationFix(
+                identifier=device_id,
+                name=source_fix.name,
+                model=source_fix.model,
+                latitude=attrs["latitude"],
+                longitude=attrs["longitude"],
+                horizontal_accuracy=attrs["gps_accuracy"],
+                timestamp_unix=attrs["last_seen"],
+                shared_by=attrs.get("owner"),
+                shared_date=attrs.get("shared_date"),
+            )
+            self.mqtt.publish_fix(compat_fix)
+
+    def _publish_battery(self, device_id: str, percentage: int):
+        if hasattr(self.mqtt, "publish_battery"):
+            self.mqtt.publish_battery(device_id, percentage)
+
+    def _set_availability(self, device_id: str, available: bool, force: bool = False):
+        previous = self._availability.get(device_id)
+        self._availability[device_id] = available
+
+        if hasattr(self.mqtt, "publish_device_availability"):
+            if force or previous != available:
+                self.mqtt.publish_device_availability(device_id, available)
+            return
+
+        if not available and previous is not False and hasattr(self.mqtt, "publish_unavailable"):
+            self.mqtt.publish_unavailable(device_id)
+
+    def _create_loop_task(self, coro, name: str) -> asyncio.Task:
+        task = asyncio.create_task(coro, name=f"presencesync-{name}")
+        task.add_done_callback(self._log_background_error)
+        return task
+
+    def _schedule(self, coro) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        self._command_tasks.add(task)
+        task.add_done_callback(self._command_tasks.discard)
+        task.add_done_callback(self._log_background_error)
+        return task
+
+    @staticmethod
+    def _log_background_error(task: asyncio.Task):
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            log.exception("Background task failed", exc_info=exc)
 
 
 _coord: Coordinator | None = None

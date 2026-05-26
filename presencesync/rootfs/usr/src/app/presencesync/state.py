@@ -1,4 +1,5 @@
-"""Persistent state — survives container restarts via /data volume."""
+# ABOUTME: Persistent state and configuration — survives container restarts via /data volume.
+# ABOUTME: Loads add-on options from HA, persists Apple auth state and runtime data.
 from __future__ import annotations
 
 import asyncio
@@ -16,58 +17,66 @@ APPLE_STATE_PATH = DATA_DIR / "apple_state.pickle"
 BUNDLE_DIR = DATA_DIR / "bundle"
 KEYS_DIR = DATA_DIR / "keys"
 DEVICE_IDENTITY_PATH = DATA_DIR / "device_identity.json"
+OPTIONS_PATH = DATA_DIR / "options.json"
 
+
+# ── Add-on config (from HA options UI → /data/options.json) ──────────────────
 
 @dataclass
-class HomeLocation:
-    latitude: float = 0.0
-    longitude: float = 0.0
-    radius_m: int = 100
+class AddonConfig:
+    """Configuration from HA add-on options. Read-only at runtime."""
+    log_level: str = "info"
+    poll_interval: int = 300
+    refresh_interval: int = 1800
+    item_poll_interval: int = 600
+    stationary_radius: int = 50
+    unavailable_timeout: int = 86400
+    devices: list = field(default_factory=list)
 
+    @classmethod
+    def load(cls) -> "AddonConfig":
+        """Load from /data/options.json (written by HA Supervisor)."""
+        if not OPTIONS_PATH.exists():
+            log.warning("No options.json found, using defaults")
+            return cls()
+        try:
+            raw = json.loads(OPTIONS_PATH.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning("Failed to load options.json (%s), using defaults", e)
+            return cls()
+        return cls(
+            log_level=raw.get("log_level", "info"),
+            poll_interval=raw.get("poll_interval", 300),
+            refresh_interval=raw.get("refresh_interval", 1800),
+            item_poll_interval=raw.get("item_poll_interval", 600),
+            stationary_radius=raw.get("stationary_radius", 50),
+            unavailable_timeout=raw.get("unavailable_timeout", 86400),
+            devices=raw.get("devices", []),
+        )
+
+
+# ── Persisted runtime state (Apple creds + flags) ────────────────────────────
 
 @dataclass
 class MqttConfig:
+    """MQTT broker connection details (auto-discovered from Supervisor)."""
     host: str = "core-mosquitto"
     port: int = 1883
     username: str = ""
     password: str = ""
-    discovery_prefix: str = "homeassistant"
-    state_prefix: str = "presencesync"
 
 
 @dataclass
 class AppleConfig:
     username: str = ""
     password: str = ""
-    anisette_url: str = ""  # empty = use built-in LocalAnisetteProvider
-
-
-@dataclass
-class TrackingConfig:
-    poll_interval_s: int = 60
-    include_devices: bool = True
-    include_airtags: bool = True
-
-    # Smart polling (global — pyicloud fetches all devices at once)
-    dynamic_polling: bool = True
-    flap_suppression_count: int = 3
-    stationary_threshold_minutes: int = 15
-    battery_low_threshold: float = 0.20
-    battery_critical_threshold: float = 0.10
-    stale_threshold_hours: float = 4.0
-
-    # AirTag polling
-    airtag_poll_interval_s: int = 600
-    airtag_movement_interval_s: int = 300
-    airtag_movement_threshold_m: float = 200.0
 
 
 @dataclass
 class Settings:
+    """Persisted runtime state — Apple auth, MQTT (auto-discovered), flags."""
     apple: AppleConfig = field(default_factory=AppleConfig)
     mqtt: MqttConfig = field(default_factory=MqttConfig)
-    home: HomeLocation = field(default_factory=HomeLocation)
-    tracking: TrackingConfig = field(default_factory=TrackingConfig)
     bundle_uploaded: bool = False
 
     @classmethod
@@ -80,10 +89,10 @@ class Settings:
             log.warning("Failed to load config (%s), using defaults", e)
             return cls()
         return cls(
-            apple=AppleConfig(**{k: v for k, v in raw.get("apple", {}).items() if k in AppleConfig.__dataclass_fields__}),
-            mqtt=MqttConfig(**{k: v for k, v in raw.get("mqtt", {}).items() if k in MqttConfig.__dataclass_fields__}),
-            home=HomeLocation(**{k: v for k, v in raw.get("home", {}).items() if k in HomeLocation.__dataclass_fields__}),
-            tracking=TrackingConfig(**{k: v for k, v in raw.get("tracking", {}).items() if k in TrackingConfig.__dataclass_fields__}),
+            apple=AppleConfig(**{k: v for k, v in raw.get("apple", {}).items()
+                                 if k in AppleConfig.__dataclass_fields__}),
+            mqtt=MqttConfig(**{k: v for k, v in raw.get("mqtt", {}).items()
+                               if k in MqttConfig.__dataclass_fields__}),
             bundle_uploaded=raw.get("bundle_uploaded", False),
         )
 
@@ -95,11 +104,23 @@ class Settings:
 
 
 _settings = Settings.load()
+_addon_config = AddonConfig.load()
 _lock = asyncio.Lock()
 
 
 def get() -> Settings:
     return _settings
+
+
+def get_addon_config() -> AddonConfig:
+    return _addon_config
+
+
+def reload_addon_config() -> AddonConfig:
+    """Re-read options.json (e.g. after user changes config in HA UI)."""
+    global _addon_config
+    _addon_config = AddonConfig.load()
+    return _addon_config
 
 
 async def update(mutator) -> Settings:

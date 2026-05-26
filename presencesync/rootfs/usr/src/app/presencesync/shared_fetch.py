@@ -1,3 +1,5 @@
+# ABOUTME: Fetches and decrypts shared Find My accessory reports from Apple's sharedFetch APIs.
+# ABOUTME: Derives shared bundle keys, signs requests, and parses decrypted location payloads.
 """Shared AirTag location fetching via Apple's sharedFetch API.
 
 This module handles the complete flow for fetching locations of shared
@@ -114,7 +116,12 @@ def is_shared_plist(path: Path) -> bool:
             data = plistlib.load(f)
         return "privateKey" in data and "wildRootKey" in data
     except Exception:
-        return False
+        # Fallback: check XML text for key presence (handles nanosecond dates)
+        try:
+            content = path.read_text()
+            return "<key>privateKey</key>" in content and "<key>wildRootKey</key>" in content
+        except Exception:
+            return False
 
 
 # --- Crypto helpers ---

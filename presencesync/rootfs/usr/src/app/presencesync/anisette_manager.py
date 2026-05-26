@@ -1,3 +1,5 @@
+# ABOUTME: Manages the embedded anisette server process used for Apple authentication headers.
+# ABOUTME: Starts, probes, and stops the local anisette service used by PresenceSync.
 """Manages the embedded anisette-v3-server subprocess.
 
 The anisette server provides Apple authentication headers required for all
@@ -22,7 +24,7 @@ ANISETTE_BINARY = Path("/usr/local/bin/anisette-v3-server")
 ANISETTE_PORT = 6969
 ANISETTE_URL = f"http://127.0.0.1:{ANISETTE_PORT}"
 HEALTH_TIMEOUT = 5
-STARTUP_TIMEOUT = 30
+STARTUP_TIMEOUT = 90
 
 
 class AnisetteManager:
@@ -35,10 +37,6 @@ class AnisetteManager:
     @property
     def url(self) -> str:
         """URL to reach the anisette server."""
-        # Allow override via config (e.g., external anisette)
-        configured = state.get().apple.anisette_url
-        if configured:
-            return configured
         return ANISETTE_URL
 
     @property
@@ -48,11 +46,6 @@ class AnisetteManager:
     async def start(self) -> bool:
         """Start the anisette server subprocess. Returns True if healthy."""
         if self.running:
-            return await self.health_check()
-
-        # If user configured external URL, don't start embedded binary
-        if state.get().apple.anisette_url:
-            log.info("Using external anisette at %s", state.get().apple.anisette_url)
             return await self.health_check()
 
         if not ANISETTE_BINARY.exists():

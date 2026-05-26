@@ -1,3 +1,5 @@
+# ABOUTME: Handles Apple account login state and fetches owned and shared Find My locations.
+# ABOUTME: Loads exported accessory keys and talks to Apple through the local anisette service.
 """Wrapper around findmy.py — login, 2FA, and AirTag location fetching.
 
 Handles both owned (via FindMy.py master_key rotation) and shared (via
@@ -8,10 +10,14 @@ Uses RemoteAnisetteProvider pointing at the embedded anisette-v3-server.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import plistlib
+import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import timezone
 from pathlib import Path
 
 from findmy import AsyncAppleAccount, FindMyAccessory, LoginState
@@ -26,6 +32,129 @@ from . import anisette_manager
 log = logging.getLogger(__name__)
 
 KEYS_DIR = state.DATA_DIR / "keys"
+ALIGNMENT_FILE = state.DATA_DIR / "alignment.json"
+
+
+def _load_shared_metadata() -> dict:
+    """Load metadata.json and build share_id → {owner_handle, share_date} map."""
+    meta_path = KEYS_DIR / "metadata.json"
+    if not meta_path.exists():
+        return {}
+    try:
+        meta = json.loads(meta_path.read_text())
+    except Exception:
+        return {}
+    # Map: sharing_circle_id → owner_handle from shared_beacons via member_circles
+    info: dict[str, dict] = {}
+    for beacon in meta.get("shared_beacons", {}).values():
+        circle_id = beacon.get("sharing_circle_id", "")
+        owner = beacon.get("owner_handle", "").removeprefix("mailto:")
+        if circle_id and owner:
+            info[circle_id] = {"owner": owner}
+    return info
+
+
+def _is_owned_plist(path: Path) -> bool:
+    """Check if a plist is an owned AirTag/accessory (has privateKey but no wildRootKey)."""
+    try:
+        content = path.read_text()
+        return "<key>privateKey</key>" in content and "<key>wildRootKey</key>" not in content
+    except Exception:
+        return False
+
+
+def _load_alignment() -> dict[str, dict]:
+    """Load saved alignment data keyed by accessory identifier."""
+    if not ALIGNMENT_FILE.exists():
+        return {}
+    try:
+        return json.loads(ALIGNMENT_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _save_alignment(accessories: list[FindMyAccessory]) -> None:
+    """Persist alignment_date + alignment_index for each accessory.
+
+    If a device has never been aligned (still at pairing date / index 0),
+    advance alignment to now so future scans only cover 7 days.
+    """
+    from datetime import datetime, timezone as tz
+    now = datetime.now(tz.utc)
+    data: dict[str, dict] = {}
+    for acc in accessories:
+        ident = getattr(acc, "_identifier", None) or getattr(acc, "identifier", None)
+        if not ident:
+            continue
+        a_date = getattr(acc, "_alignment_date", None)
+        a_index = getattr(acc, "_alignment_index", None)
+        paired_at = getattr(acc, "_paired_at", None)
+        if a_date is not None and a_index is not None:
+            # If alignment never advanced beyond pairing defaults, cap to now
+            if paired_at and a_date == paired_at and a_index == 0:
+                a_date = now
+                a_index = 0
+                log.info("Advancing alignment for %s (never reported) to now", ident)
+            data[ident] = {
+                "alignment_date": a_date.isoformat(),
+                "alignment_index": a_index,
+            }
+    try:
+        ALIGNMENT_FILE.write_text(json.dumps(data, indent=2))
+    except Exception:
+        log.warning("Failed to save alignment data")
+
+
+def _load_owned_plist(path: Path, alignment: dict | None = None) -> FindMyAccessory | None:
+    """Load an owned AirTag from export-findmy's flat plist format.
+
+    export-findmy produces plists with nanosecond pairingDate values
+    that Python's plistlib can't parse, and a flat structure (no nested
+    dicts like macOS's native format). We strip fractional seconds and
+    construct FindMyAccessory directly.
+    """
+    try:
+        text = path.read_text()
+        # Strip fractional seconds from <date> elements (plistlib only handles YYYY-MM-DDTHH:MM:SSZ)
+        fixed = re.sub(
+            r"<date>(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.\d+Z</date>",
+            r"<date>\1Z</date>",
+            text,
+        )
+        data = plistlib.loads(fixed.encode())
+
+        private_key = data["privateKey"]
+        # P-224 key: 57B public + 28B private scalar = 85B
+        # P-256 key: 65B public + 32B private scalar = 97B
+        # Take last 28 bytes as master_key (matches FindMy.py convention)
+        master_key = private_key[-28:]
+
+        # Restore alignment if available
+        from datetime import datetime
+        alignment_date = None
+        alignment_index = None
+        if alignment:
+            try:
+                alignment_date = datetime.fromisoformat(alignment["alignment_date"])
+                alignment_index = alignment["alignment_index"]
+            except (KeyError, ValueError):
+                pass
+
+        acc = FindMyAccessory(
+            master_key=master_key,
+            skn=data["sharedSecret"],
+            sks=data.get("secondarySharedSecret", data.get("secureLocationsSharedSecret", b"")),
+            paired_at=data["pairingDate"].replace(tzinfo=timezone.utc),
+            name=data.get("name") or None,
+            model=data.get("model") or None,
+            identifier=data.get("identifier") or None,
+            alignment_date=alignment_date,
+            alignment_index=alignment_index,
+        )
+        return acc
+    except Exception as e:
+        log.warning("Failed to load owned plist %s: %s", path.name, e)
+        return None
 
 
 def _get_anisette_dict(url: str) -> dict[str, str]:
@@ -45,6 +174,8 @@ class LocationFix:
     longitude: float
     horizontal_accuracy: float
     timestamp_unix: int
+    shared_by: str | None = None
+    shared_date: str | None = None
 
 
 class AppleClient:
@@ -82,6 +213,9 @@ class AppleClient:
             for k, v in saved.items():
                 if k in RESTORABLE:
                     try:
+                        # Convert raw int back to LoginState enum
+                        if k == "_login_state" and isinstance(v, int):
+                            v = LoginState(v)
                         setattr(self.account, k, v)
                         applied.append(k)
                     except Exception:
@@ -124,7 +258,7 @@ class AppleClient:
         """Load AirTag accessories from extracted bundle directory.
 
         Handles both:
-        - Owned accessories (via FindMy.py's list_accessories + BeaconStore.key)
+        - Owned accessories (flat plists from export-findmy, or encrypted + BeaconStore.key)
         - Shared accessories (custom SharedAccessory from plist with wildRootKey)
         """
         self.shared_accessories = []
@@ -138,22 +272,41 @@ class AppleClient:
                     self.shared_accessories.append(shared)
                     log.info("Loaded shared accessory: %s (%s)", shared.name, shared.share_id[:8])
 
-        # Load owned accessories (require BeaconStore.key)
+        # Load owned accessories
         bs_path = bundle_dir / "BeaconStore.key"
         if bs_path.exists():
+            # macOS encrypted format: decrypt with BeaconStore.key
             self.beaconstore_key = bs_path.read_bytes()
             if len(self.beaconstore_key) != 32:
                 log.warning("BeaconStore.key is %dB, expected 32 — skipping owned accessories",
                             len(self.beaconstore_key))
             else:
-                # Remove macOS AppleDouble sidecars
                 for p in bundle_dir.rglob("._*"):
                     if p.is_file():
                         p.unlink(missing_ok=True)
                 _fm_plist._DEFAULT_SEARCH_PATH = bundle_dir
                 self.accessories = list_accessories(key=self.beaconstore_key, search_path=bundle_dir)
         else:
-            log.info("No BeaconStore.key found — only shared accessories loaded")
+            # export-findmy flat format: load directly (no BeaconStore.key needed)
+            alignment_data = _load_alignment()
+            for plist_path in bundle_dir.glob("*.plist"):
+                if _is_owned_plist(plist_path):
+                    # Peek at identifier to find alignment (need to parse plist briefly)
+                    try:
+                        text = plist_path.read_text()
+                        fixed = re.sub(
+                            r"<date>(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.\d+Z</date>",
+                            r"<date>\1Z</date>", text)
+                        ident = plistlib.loads(fixed.encode()).get("identifier")
+                    except Exception:
+                        ident = None
+                    align = alignment_data.get(ident) if ident else None
+                    acc = _load_owned_plist(plist_path, align)
+                    if acc:
+                        self.accessories.append(acc)
+                        log.info("Loaded owned accessory: %s (%s)%s",
+                                 acc.name, acc.identifier,
+                                 " [aligned]" if align else "")
 
         log.info("Loaded: %d owned + %d shared accessories",
                  len(self.accessories), len(self.shared_accessories))
@@ -189,6 +342,9 @@ class AppleClient:
 
         results = await asyncio.gather(*[_one(a) for a in self.accessories])
         self._persist()
+
+        # Save alignment data so subsequent restarts don't rescan from pairing date
+        _save_alignment(self.accessories)
 
         out: list[LocationFix] = []
         for acc, report in results:
@@ -228,18 +384,9 @@ class AppleClient:
             log.warning("Cannot fetch shared: failed to get tokens: %s", e)
             return []
 
-        # Get anisette headers from the account's anisette provider
-        # This is the proper way — the provider generates user-specific headers
+        # Get anisette headers from the account (uses uid/devid internally)
         try:
-            if self.anisette is not None:
-                anisette_headers = await asyncio.get_event_loop().run_in_executor(
-                    None, self.anisette.get_headers
-                )
-            else:
-                mgr = anisette_manager.get()
-                anisette_headers = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: _get_anisette_dict(mgr.url)
-                )
+            anisette_headers = await self.account.get_anisette_headers()
         except Exception as e:
             log.warning("Cannot fetch shared: anisette failed: %s", e)
             return []
@@ -257,19 +404,33 @@ class AppleClient:
             return []
 
         # Convert to LocationFix (use most recent report per accessory)
+        # Build lookup: accessory name → shared metadata
+        shared_meta = _load_shared_metadata()
+        acc_by_name = {acc.name: acc for acc in self.shared_accessories}
+
         out: list[LocationFix] = []
         for name, reports in results.items():
             if not reports:
                 continue
             latest = max(reports, key=lambda r: r.timestamp)
+            acc = acc_by_name.get(name)
+            owner = None
+            share_date_str = None
+            if acc:
+                meta_info = shared_meta.get(acc.share_id, {})
+                owner = meta_info.get("owner")
+                if acc.share_date:
+                    share_date_str = acc.share_date.strftime("%Y-%m-%d")
             out.append(LocationFix(
-                identifier=f"shared-{name}",
+                identifier=acc.share_id,
                 name=name,
                 model="AirTag (Shared)",
                 latitude=latest.latitude,
                 longitude=latest.longitude,
                 horizontal_accuracy=float(latest.accuracy),
                 timestamp_unix=int(latest.timestamp.timestamp()),
+                shared_by=owner,
+                shared_date=share_date_str,
             ))
         log.info("fetch_shared: %d/%d shared accessories reported",
                  len(out), len(self.shared_accessories))
@@ -279,23 +440,17 @@ class AppleClient:
         if self.account is None:
             return
         try:
-            blob = None
-            for attr_name in ("state", "state_info", "export_state", "to_dict"):
-                attr = getattr(self.account, attr_name, None)
-                if attr is None:
-                    continue
-                try:
-                    blob = attr() if callable(attr) else attr
-                    if isinstance(blob, dict):
-                        break
-                    blob = None
-                except Exception:
-                    continue
-            if blob is None:
-                getstate = getattr(self.account, "__getstate__", None)
-                if callable(getstate):
-                    blob = getstate()
-            if blob is not None:
+            # Save only the restorable fields (avoid pickling anisette/aiohttp objects)
+            blob = {}
+            for attr in ("_uid", "_devid", "_username", "_password",
+                         "_login_state", "_login_state_data", "_account_info"):
+                val = getattr(self.account, attr, None)
+                if val is not None:
+                    # Convert LoginState enum to int for safe pickling
+                    if attr == "_login_state" and hasattr(val, "value"):
+                        val = val.value
+                    blob[attr] = val
+            if blob:
                 state.save_apple_state(blob)
         except Exception:
             log.warning("Could not persist Apple state", exc_info=True)

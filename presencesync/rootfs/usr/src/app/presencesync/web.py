@@ -1,9 +1,5 @@
-"""Minimal FastAPI setup wizard — Apple login/2FA + AirTag bundle upload.
-
-No dashboard. HA native UI (Lovelace + device_tracker entities) handles
-all visualization. This provides only the interactive flows that can't be
-done through add-on options alone.
-"""
+# ABOUTME: FastAPI setup wizard for Apple login, 2FA, key extraction, and bundle upload.
+# ABOUTME: Serves the ingress UI. All device operations happen via MQTT, not REST.
 from __future__ import annotations
 
 import asyncio
@@ -15,9 +11,8 @@ import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse
-from findmy import LoginState
+from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 
 from . import state, supervisor
 from .coordinator import get as get_coord
@@ -30,21 +25,7 @@ logging.basicConfig(level=os.environ.get("PRESENCESYNC_LOG_LEVEL", "info").upper
 
 
 async def _auto_configure() -> None:
-    """Fill in MQTT broker + home location from HA's Supervisor APIs."""
-    s = state.get()
-
-    # Clear any stale anisette_url — local provider is used by default now
-    if s.apple.anisette_url and s.apple.anisette_url.startswith("http://local"):
-        await state.update(lambda x: setattr(x.apple, "anisette_url", ""))
-
-    if not s.mqtt.discovery_prefix:
-        await state.update(lambda x: setattr(x.mqtt, "discovery_prefix",
-                                             os.environ.get("PRESENCESYNC_DISCOVERY_PREFIX", "homeassistant")))
-    if not s.mqtt.state_prefix:
-        await state.update(lambda x: setattr(x.mqtt, "state_prefix",
-                                             os.environ.get("PRESENCESYNC_STATE_PREFIX", "presencesync")))
-
-    # MQTT creds from Supervisor
+    """Fill in MQTT broker credentials from HA's Supervisor APIs."""
     mqtt_info = await supervisor.discover_mqtt()
     if mqtt_info:
         log.info("auto-discovered MQTT: %s:%s", mqtt_info.host, mqtt_info.port)
@@ -54,18 +35,6 @@ async def _auto_configure() -> None:
             x.mqtt.username = mqtt_info.username
             x.mqtt.password = mqtt_info.password
         await state.update(m)
-
-    # Home zone from HA core
-    if not s.home.latitude:
-        home_info = await supervisor.discover_home()
-        if home_info:
-            log.info("auto-discovered home: %s, %s r=%sm",
-                     home_info.latitude, home_info.longitude, home_info.radius_m)
-            def m(x):
-                x.home.latitude = home_info.latitude
-                x.home.longitude = home_info.longitude
-                x.home.radius_m = int(home_info.radius_m)
-            await state.update(m)
 
 
 @asynccontextmanager
@@ -96,15 +65,31 @@ class _CollapseSlashesMiddleware:
 app = FastAPI(title="PresenceSync", lifespan=lifespan)
 app.add_middleware(_CollapseSlashesMiddleware)
 
+# CORS for local testing (HA ingress handles auth in production)
+try:
+    from fastapi.middleware.cors import CORSMiddleware
+    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+except ImportError:
+    pass
+
+
+# ─── Static UI ────────────────────────────────────────────────────────────────
+
+_STATIC_DIR = Path(__file__).parent / "static"
+
+
+@app.get("/")
+async def index():
+    """Serve the ingress setup wizard UI."""
+    return FileResponse(_STATIC_DIR / "index.html", media_type="text/html")
+
 
 # ─── Status ──────────────────────────────────────────────────────────────────
 
-@app.get("/")
 @app.get("/api/status")
 async def status():
     """Lightweight status for debugging — replaces the old dashboard."""
     coord = get_coord()
-    s = state.get()
     mgr = anisette_manager.get()
     return {
         "version": __import__("presencesync").__version__,
@@ -114,10 +99,9 @@ async def status():
         "airtags_owned": len(coord.apple.accessories),
         "airtags_shared": len(coord.apple.shared_accessories),
         "last_poll_unix": coord.last_run_unix,
-        "airtag_fixes": len(coord.last_fixes),
-        "device_fixes": len(coord.last_device_fixes),
         "anisette_running": mgr.running,
         "extractor_available": _extractor_mod.get().available,
+        "addon_config": state.get_addon_config().__dict__,
     }
 
 
@@ -163,27 +147,18 @@ async def apple_login(body: dict):
 
 @app.post("/api/apple/2fa/submit")
 async def apple_submit_2fa(body: dict):
-    """Submit 2FA code to both backends (same code typically works for both)."""
+    """Submit 2FA code to both backends.
+    
+    Submits to pyicloud first (simple validation), then findmy.py.
+    Apple may consume the code on first use, so order matters.
+    If one backend fails, the other may still succeed.
+    """
     code = body.get("code") or ""
     if not code:
         raise HTTPException(400, "code required")
     coord = get_coord()
-    s = state.get()
 
-    # findmy.py
-    findmy_state = str(coord.apple.last_login_state)
-    if "REQUIRE_2FA" not in findmy_state and "LOGGED_IN" not in findmy_state:
-        try:
-            findmy_state = str(await coord.apple.login(s.apple.username, s.apple.password))
-        except Exception as e:
-            findmy_state = f"ERROR: {type(e).__name__}: {e}"
-    if "REQUIRE_2FA" in findmy_state:
-        try:
-            findmy_state = str(await coord.apple.submit_2fa(code))
-        except Exception as e:
-            findmy_state = f"ERROR: {type(e).__name__}: {e}"
-
-    # pyicloud
+    # pyicloud first (simpler validation, less likely to consume the code)
     icloud_state = coord.icloud.login_state
     if icloud_state == "needs_2fa":
         try:
@@ -193,9 +168,22 @@ async def apple_submit_2fa(body: dict):
         except Exception as e:
             icloud_state = f"ERROR: {type(e).__name__}: {e}"
 
-    if "LOGGED_IN" in findmy_state or icloud_state == "logged_in":
-        return {"findmy_state": findmy_state, "icloud_state": icloud_state}
-    raise HTTPException(500, f"2FA failed: findmy={findmy_state} icloud={icloud_state}")
+    # findmy.py
+    findmy_state = str(coord.apple.last_login_state)
+    if "REQUIRE_2FA" in findmy_state:
+        try:
+            findmy_state = str(await coord.apple.submit_2fa(code))
+        except Exception as e:
+            findmy_state = f"ERROR: {type(e).__name__}: {e}"
+
+    # Reload keys if findmy is now logged in
+    if "LOGGED_IN" in findmy_state:
+        try:
+            coord.apple.load_keys_dir()
+        except Exception:
+            pass
+
+    return {"findmy_state": findmy_state, "icloud_state": icloud_state}
 
 
 # ─── AirTag Bundle Upload ────────────────────────────────────────────────────
@@ -255,25 +243,11 @@ async def upload_bundle(file: UploadFile):
     }
 
 
-# ─── Find My Sound ───────────────────────────────────────────────────────────
-
-@app.post("/api/devices/{device_id}/play-sound")
-async def play_sound(device_id: str):
-    """Trigger Find My alert sound on a device."""
-    coord = get_coord()
-    success = await asyncio.get_event_loop().run_in_executor(
-        None, coord.icloud.play_sound, device_id
-    )
-    if success:
-        return {"status": "ok", "device_id": device_id}
-    return JSONResponse({"error": "device not found or not reachable"}, status_code=404)
-
-
 # ─── Reset ────────────────────────────────────────────────────────────────────
 
 @app.post("/api/reset")
 async def reset():
-    """Clear Apple sessions + bundle. Keeps MQTT/home config."""
+    """Clear Apple sessions + bundle. Keeps MQTT config."""
     state.clear_apple_state()
     await state.update(lambda s: (
         setattr(s.apple, "username", ""),
@@ -368,6 +342,8 @@ async def extract_passcode(body: dict):
         # Reload keys after successful extraction
         coord = get_coord()
         coord.apple.load_keys_dir()
+        # Dismiss the repair alert now that keys are loaded
+        await supervisor.dismiss_repair("extraction_needed")
     return {
         "phase": result.phase,
         "message": result.message,
@@ -384,11 +360,3 @@ async def list_keys():
     return {"keys": [{"name": k.name, "size": k.stat().st_size} for k in keys]}
 
 
-# ─── Poll Now ─────────────────────────────────────────────────────────────────
-
-@app.post("/api/poll-now")
-async def poll_now():
-    """Trigger immediate poll of all loops."""
-    coord = get_coord()
-    await coord.poll_now()
-    return {"ok": True, "fixes": len(coord.last_fixes), "devices": len(coord.last_device_fixes)}

@@ -1,3 +1,5 @@
+# ABOUTME: Runs the export-findmy helper to extract Apple Find My accessory keys.
+# ABOUTME: Tracks interactive extraction prompts and stores exported plist files under /data.
 """Python wrapper around the embedded export-findmy Rust binary.
 
 Drives the interactive export process via subprocess, handling:
@@ -22,7 +24,6 @@ log = logging.getLogger(__name__)
 
 EXPORT_BINARY = Path("/usr/local/bin/export-findmy")
 KEYS_DIR = state.DATA_DIR / "keys"
-DEVICE_IDENTITY_PATH = state.DATA_DIR / "device_identity.json"
 
 
 @dataclass
@@ -55,7 +56,7 @@ class Extractor:
     async def start_extraction(
         self,
         apple_id: str,
-        anisette_url: str,
+        server_url: str,
     ) -> ExtractionStatus:
         """Start the export-findmy process. Prompts for password next."""
         if self._process is not None and self._process.returncode is None:
@@ -70,12 +71,8 @@ class Extractor:
             str(EXPORT_BINARY),
             "--output-dir", str(KEYS_DIR),
             "--apple-id", apple_id,
-            "--anisette-url", anisette_url,
+            "--anisette-url", server_url,
         ]
-
-        # Pass device identity if we have one (prevents creating new bottles)
-        if DEVICE_IDENTITY_PATH.exists():
-            args.extend(["--device-identity", str(DEVICE_IDENTITY_PATH)])
 
         env = os.environ.copy()
 
@@ -89,6 +86,7 @@ class Extractor:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=env,
+                cwd=str(state.DATA_DIR),  # binary reads/writes device_identity.json from cwd
             )
         except Exception as e:
             self._status = ExtractionStatus(phase="error", error=str(e))
