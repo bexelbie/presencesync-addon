@@ -266,7 +266,7 @@ def _get_share_base_date(
     )
 
     if resp.status_code != 200:
-        log.warning("getShare failed: %d %s", resp.status_code, resp.text[:200])
+        log.debug("getShare failed: %d %s", resp.status_code, resp.text[:200])
         return None
 
     result = resp.json()
