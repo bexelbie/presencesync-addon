@@ -31,7 +31,7 @@ RUN mkdir -p /build/rustpush-local/apple-private-apis/clearadi/src \
        > /build/rustpush-local/apple-private-apis/clearadi/Cargo.toml \
     && echo '' > /build/rustpush-local/apple-private-apis/clearadi/src/lib.rs
 
-RUN git clone --depth 1 \
+RUN git clone --branch presencesync --depth 1 \
     https://github.com/bexelbie/export-findmy.git /build/export-findmy
 
 # Rewrite Cargo.toml to use local paths for build
