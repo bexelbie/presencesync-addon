@@ -349,8 +349,10 @@ class AppleClient:
         out: list[LocationFix] = []
         for acc, report in results:
             if report is None:
+                log.debug("fetch %s: no report", getattr(acc, "name", "?"))
                 continue
             j = acc.to_json() if hasattr(acc, "to_json") else {}
+            log.debug("fetch %s: report ts=%d", j.get("name") or "?", int(report.timestamp.timestamp()))
             out.append(LocationFix(
                 identifier=j.get("identifier") or getattr(acc, "name", "unknown"),
                 name=j.get("name") or j.get("identifier") or "unknown",

@@ -97,6 +97,10 @@ class Coordinator:
         self._icloud_ctx_reset_interval = 2 * 3600
         self._icloud_last_ctx_reset = 0.0
 
+        self._poll_count = 0
+        self._refresh_count = 0
+        self._item_count = 0
+
     async def start(self):
         if any(task is not None and not task.done() for task in (self._poll_task, self._refresh_task, self._item_task)):
             return
@@ -181,6 +185,9 @@ class Coordinator:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
                 return
             except asyncio.TimeoutError:
+                self._poll_count += 1
+                if self._poll_count % 10 == 0:
+                    log.debug("poll heartbeat: cycle #%d", self._poll_count)
                 await self._do_poll()
 
     async def _refresh_loop(self):
@@ -192,6 +199,9 @@ class Coordinator:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
                 return
             except asyncio.TimeoutError:
+                self._refresh_count += 1
+                if self._refresh_count % 10 == 0:
+                    log.debug("refresh heartbeat: cycle #%d", self._refresh_count)
                 await self._do_refresh()
 
     async def _item_loop(self):
@@ -203,6 +213,9 @@ class Coordinator:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
                 return
             except asyncio.TimeoutError:
+                self._item_count += 1
+                if self._item_count % 10 == 0:
+                    log.debug("item_fetch heartbeat: cycle #%d", self._item_count)
                 await self._do_fetch_items()
 
     async def _do_poll(self):
@@ -294,6 +307,8 @@ class Coordinator:
                 self._fmi_id_by_beacon_id[beacon_id] = d.identifier
 
         if d.timestamp_unix <= self._published_timestamps.get(device_id, 0):
+            log.debug("idevice %s dedup: ts %d <= published %d",
+                      device_id, d.timestamp_unix, self._published_timestamps[device_id])
             return
 
         lat, lon = self._apply_stationary(device_id, d.latitude, d.longitude)
@@ -319,6 +334,7 @@ class Coordinator:
         self._publish_location(device_id, attrs, source_fix=d)
         if d.battery_level is not None and d.battery_level > 0:
             self._publish_battery(device_id, int(d.battery_level * 100))
+        log.debug("published idevice %s (%s) ts=%d", device_id, d.name, d.timestamp_unix)
 
         self._published_timestamps[device_id] = max(
             self._published_timestamps.get(device_id, 0),
@@ -347,6 +363,8 @@ class Coordinator:
         if store.is_excluded(device_id, config.devices):
             return
         if fix.timestamp_unix <= self._published_timestamps.get(device_id, 0):
+            log.debug("item %s dedup: ts %d <= published %d",
+                      device_id, fix.timestamp_unix, self._published_timestamps[device_id])
             return
 
         lat, lon = self._apply_stationary(device_id, fix.latitude, fix.longitude)
@@ -374,6 +392,7 @@ class Coordinator:
                 has_play_sound=False,
             )
         self._publish_location(device_id, attrs, source_fix=fix)
+        log.debug("published item %s (%s) ts=%d", device_id, fix.name, fix.timestamp_unix)
 
         self._published_timestamps[device_id] = max(
             self._published_timestamps.get(device_id, 0),
