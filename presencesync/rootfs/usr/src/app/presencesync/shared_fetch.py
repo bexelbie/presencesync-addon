@@ -299,7 +299,7 @@ def fetch_shared_locations(
         accessories: list of SharedAccessory objects
 
     Returns:
-        dict mapping accessory name → list of SharedLocationReport
+        dict mapping share_id → list of SharedLocationReport
     """
     if not accessories:
         return {}
@@ -403,11 +403,12 @@ def fetch_shared_locations(
             if report:
                 reports.append(report)
 
-        if acc.name not in results:
-            results[acc.name] = []
-        results[acc.name].extend(reports)
+        if acc.share_id not in results:
+            results[acc.share_id] = []
+        results[acc.share_id].extend(reports)
 
-    for name, reports in results.items():
-        log.info("Shared %s: %d reports decrypted", name, len(reports))
+    for share_id, reports in results.items():
+        acc = plist_info[share_id]
+        log.info("Shared %s: %d reports decrypted", acc.name, len(reports))
 
     return results

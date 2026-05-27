@@ -404,16 +404,15 @@ class AppleClient:
             return []
 
         # Convert to LocationFix (use most recent report per accessory)
-        # Build lookup: accessory name → shared metadata
         shared_meta = _load_shared_metadata()
-        acc_by_name = {acc.name: acc for acc in self.shared_accessories}
+        acc_by_share_id = {acc.share_id: acc for acc in self.shared_accessories}
 
         out: list[LocationFix] = []
-        for name, reports in results.items():
+        for share_id, reports in results.items():
             if not reports:
                 continue
             latest = max(reports, key=lambda r: r.timestamp)
-            acc = acc_by_name.get(name)
+            acc = acc_by_share_id.get(share_id)
             owner = None
             share_date_str = None
             if acc:
@@ -422,8 +421,8 @@ class AppleClient:
                 if acc.share_date:
                     share_date_str = acc.share_date.strftime("%Y-%m-%d")
             out.append(LocationFix(
-                identifier=acc.share_id,
-                name=name,
+                identifier=share_id,
+                name=acc.name if acc else share_id,
                 model="AirTag (Shared)",
                 latitude=latest.latitude,
                 longitude=latest.longitude,
