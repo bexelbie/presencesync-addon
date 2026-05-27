@@ -31,7 +31,6 @@ options:
   refresh_interval: 1800
   item_poll_interval: 600
   stationary_radius: 50
-  unavailable_timeout: 86400
   devices: []
 schema:
   log_level: list(debug|info|warning|error)
@@ -39,9 +38,7 @@ schema:
   refresh_interval: int(0,86400)
   item_poll_interval: int(0,86400)
   stationary_radius: int(0,10000)
-  unavailable_timeout: int(0,604800)
   devices:
     - id: str
       stationary_radius: int?
       exclude: bool?
-      unavailable_timeout: int?

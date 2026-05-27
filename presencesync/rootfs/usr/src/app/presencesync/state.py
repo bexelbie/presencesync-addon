@@ -30,7 +30,6 @@ class AddonConfig:
     refresh_interval: int = 1800
     item_poll_interval: int = 600
     stationary_radius: int = 50
-    unavailable_timeout: int = 86400
     devices: list = field(default_factory=list)
 
     @classmethod
@@ -50,7 +49,6 @@ class AddonConfig:
             refresh_interval=raw.get("refresh_interval", 1800),
             item_poll_interval=raw.get("item_poll_interval", 600),
             stationary_radius=raw.get("stationary_radius", 50),
-            unavailable_timeout=raw.get("unavailable_timeout", 86400),
             devices=raw.get("devices", []),
         )
 

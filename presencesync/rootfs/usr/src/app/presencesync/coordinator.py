@@ -22,6 +22,7 @@ from .mqtt import MqttPublisher
 log = logging.getLogger(__name__)
 
 KEYS_DIR = state.DATA_DIR / "keys"
+KNOWN_DEVICES_PATH = state.DATA_DIR / "known_devices.json"
 
 
 def _load_cloudkit_to_stable_map(metadata_dir: Path | None = None) -> dict[str, str]:
@@ -72,8 +73,9 @@ class Coordinator:
         self.last_device_fixes: list[DeviceFix] = []
 
         self._anchors: dict[str, tuple[float, float]] = {}
-        self._last_seen: dict[str, int] = {}
         self._availability: dict[str, bool] = {}
+        self._prev_idevice_ids: set[str] = set()
+        self._prev_item_ids: set[str] = set()
 
         self._fmi_ts_by_beacon_id: dict[str, int] = {}
         self._fmi_id_by_beacon_id: dict[str, str] = {}
@@ -119,6 +121,7 @@ class Coordinator:
 
         self._load_item_keys()
         self._reload_cloudkit_mapping()
+        self._load_known_devices()
         await self._resume_icloud_session()
 
         has_keys = bool(self.apple.accessories or self.apple.shared_accessories)
@@ -207,7 +210,6 @@ class Coordinator:
             self._reload_cloudkit_mapping()
             if not await self._ensure_icloud_session():
                 self.last_device_fixes = []
-                await self._publish_unavailable_devices()
                 return
 
             try:
@@ -223,14 +225,13 @@ class Coordinator:
             self.last_run_unix = int(time.time())
             for device_fix in device_fixes:
                 await self._process_idevice(device_fix)
-            await self._publish_unavailable_devices()
+            self._update_idevice_availability(device_fixes)
 
     async def _do_refresh(self):
         async with self._device_lock:
             self._reload_cloudkit_mapping()
             if not await self._ensure_icloud_session():
                 self.last_device_fixes = []
-                await self._publish_unavailable_devices()
                 return
 
             try:
@@ -247,18 +248,15 @@ class Coordinator:
             self.last_run_unix = int(time.time())
             for device_fix in device_fixes:
                 await self._process_idevice(device_fix)
-            await self._publish_unavailable_devices()
 
     async def _do_fetch_items(self):
         async with self._item_lock:
             self._reload_cloudkit_mapping()
             if self.apple.last_login_state != LoginState.LOGGED_IN:
                 self.last_fixes = []
-                await self._publish_unavailable_devices()
                 return
             if not self.apple.accessories and not self.apple.shared_accessories:
                 self.last_fixes = []
-                await self._publish_unavailable_devices()
                 return
 
             fixes: list[LocationFix] = []
@@ -269,14 +267,13 @@ class Coordinator:
                     fixes.extend(await self.apple.fetch_shared_location_fixes())
             except Exception:
                 log.exception("Item fetch failed")
-                await self._publish_unavailable_devices()
                 return
 
             self.last_fixes = fixes
             self.last_run_unix = int(time.time())
             for fix in fixes:
                 await self._process_item(fix)
-            await self._publish_unavailable_devices()
+            self._update_item_availability(fixes)
 
     async def _process_idevice(self, d: DeviceFix):
         store = identity.get()
@@ -327,8 +324,6 @@ class Coordinator:
             self._published_timestamps.get(device_id, 0),
             d.timestamp_unix,
         )
-        self._last_seen[device_id] = max(self._last_seen.get(device_id, 0), d.timestamp_unix)
-        self._set_availability(device_id, True, force=True)
 
     async def _process_item(self, fix: LocationFix):
         store = identity.get()
@@ -384,8 +379,6 @@ class Coordinator:
             self._published_timestamps.get(device_id, 0),
             fix.timestamp_unix,
         )
-        self._last_seen[device_id] = max(self._last_seen.get(device_id, 0), fix.timestamp_unix)
-        self._set_availability(device_id, True, force=True)
 
     def _apply_stationary(self, device_id: str, lat: float, lon: float) -> tuple[float, float]:
         """Return anchor coordinates while the device stays within its stationary radius."""
@@ -410,22 +403,77 @@ class Coordinator:
         self._anchors[device_id] = (lat, lon)
         return (lat, lon)
 
-    async def _publish_unavailable_devices(self):
-        now_unix = int(time.time())
-        store = identity.get()
-        addon_config = state.get_addon_config()
-        known_device_ids = set(store.known_device_ids()) | set(self._last_seen.keys())
-        for device_id in known_device_ids:
-            timeout = store.get_unavailable_timeout(
-                device_id,
-                addon_config.devices,
-                addon_config.unavailable_timeout,
+    def _load_known_devices(self):
+        """Load cached device sets from last run to avoid false offlines on startup."""
+        path = KNOWN_DEVICES_PATH
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text())
+            self._prev_idevice_ids = set(data.get("idevices", []))
+            self._prev_item_ids = set(data.get("items", []))
+            log.info(
+                "Loaded known devices cache: %d idevices, %d items",
+                len(self._prev_idevice_ids),
+                len(self._prev_item_ids),
             )
-            if timeout <= 0:
+        except (OSError, json.JSONDecodeError):
+            log.warning("Failed to load known_devices.json, starting fresh")
+
+    def _save_known_devices(self):
+        """Persist current device sets so the next startup can avoid false offlines."""
+        data = {
+            "idevices": sorted(self._prev_idevice_ids),
+            "items": sorted(self._prev_item_ids),
+        }
+        try:
+            KNOWN_DEVICES_PATH.write_text(json.dumps(data))
+        except OSError:
+            log.exception("Failed to save known_devices.json")
+
+    def _update_idevice_availability(self, device_fixes: list[DeviceFix]):
+        """Mark iDevices offline if Apple stopped reporting them."""
+        store = identity.get()
+        config = state.get_addon_config()
+        current_ids: set[str] = set()
+        for d in device_fixes:
+            device_id = store.register(d.identifier, d.name, "fmip")
+            if not store.is_excluded(device_id, config.devices):
+                current_ids.add(device_id)
+
+        disappeared = self._prev_idevice_ids - current_ids
+        for device_id in disappeared:
+            self._set_availability(device_id, False)
+
+        for device_id in current_ids:
+            self._set_availability(device_id, True)
+
+        self._prev_idevice_ids = current_ids
+        self._save_known_devices()
+
+    def _update_item_availability(self, fixes: list[LocationFix]):
+        """Mark items offline if Apple stopped reporting them."""
+        store = identity.get()
+        config = state.get_addon_config()
+        current_ids: set[str] = set()
+        for fix in fixes:
+            ident = fix.identifier or ""
+            is_idevice_beacon = ident.startswith("l:/") or ident.startswith("me:/")
+            if is_idevice_beacon:
                 continue
-            last_seen = self._last_seen.get(device_id, 0)
-            if now_unix - last_seen > timeout:
-                self._set_availability(device_id, False)
+            device_id = store.register(ident, fix.name, "item")
+            if not store.is_excluded(device_id, config.devices):
+                current_ids.add(device_id)
+
+        disappeared = self._prev_item_ids - current_ids
+        for device_id in disappeared:
+            self._set_availability(device_id, False)
+
+        for device_id in current_ids:
+            self._set_availability(device_id, True)
+
+        self._prev_item_ids = current_ids
+        self._save_known_devices()
 
     async def _do_play_sound(self, device_id: str):
         raw_device_id = self._raw_icloud_ids_by_device_id.get(device_id, device_id)

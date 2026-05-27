@@ -79,6 +79,7 @@ def mock_state(tmp_path, monkeypatch):
         monkeypatch.setattr(sys.modules["presencesync.icloud"], "COOKIE_DIR", tmp_path / "pyicloud-cookies")
     if "presencesync.coordinator" in sys.modules:
         monkeypatch.setattr(sys.modules["presencesync.coordinator"], "KEYS_DIR", tmp_path / "keys")
+        monkeypatch.setattr(sys.modules["presencesync.coordinator"], "KNOWN_DEVICES_PATH", tmp_path / "known_devices.json")
     if "presencesync.apple" in sys.modules:
         monkeypatch.setattr(sys.modules["presencesync.apple"], "KEYS_DIR", tmp_path / "keys")
         monkeypatch.setattr(sys.modules["presencesync.apple"], "ALIGNMENT_FILE", tmp_path / "alignment.json")

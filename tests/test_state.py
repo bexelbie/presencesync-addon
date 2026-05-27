@@ -12,7 +12,6 @@ def test_addon_config_loads_valid_options(mock_state):
         "refresh_interval": 900,
         "item_poll_interval": 240,
         "stationary_radius": 75,
-        "unavailable_timeout": 600,
         "devices": [{"id": "abc123", "stationary_radius": 5}],
     }))
 
@@ -24,7 +23,6 @@ def test_addon_config_loads_valid_options(mock_state):
         refresh_interval=900,
         item_poll_interval=240,
         stationary_radius=75,
-        unavailable_timeout=600,
         devices=[{"id": "abc123", "stationary_radius": 5}],
     )
 
@@ -77,11 +75,9 @@ def test_device_overrides_are_available_in_loaded_config(mock_state):
     device_id = store.register("raw-device-id", "Test Phone", "fmip")
     mock_state.OPTIONS_PATH.write_text(json.dumps({
         "stationary_radius": 50,
-        "unavailable_timeout": 300,
         "devices": [{
             "id": device_id,
             "stationary_radius": 5,
-            "unavailable_timeout": 90,
             "exclude": True,
         }],
     }))
@@ -91,10 +87,8 @@ def test_device_overrides_are_available_in_loaded_config(mock_state):
     assert store.get_config(device_id, config.devices) == {
         "stationary_radius": 5,
         "exclude": True,
-        "unavailable_timeout": 90,
     }
     assert store.get_stationary_radius(device_id, config.devices, config.stationary_radius) == 5
-    assert store.get_unavailable_timeout(device_id, config.devices, config.unavailable_timeout) == 90
     assert store.is_excluded(device_id, config.devices) is True
 
 

@@ -51,7 +51,6 @@ def test_get_config_supports_list_and_helpers(mock_state):
             "id": device_hash,
             "stationary_radius": 0,
             "exclude": True,
-            "unavailable_timeout": 90,
         },
         {"id": "other-device", "stationary_radius": 50},
     ]
@@ -59,18 +58,14 @@ def test_get_config_supports_list_and_helpers(mock_state):
     assert store.get_config(device_hash, addon_devices) == {
         "stationary_radius": 0,
         "exclude": True,
-        "unavailable_timeout": 90,
     }
     assert store.get_config(device_hash, {"devices": addon_devices}) == {
         "stationary_radius": 0,
         "exclude": True,
-        "unavailable_timeout": 90,
     }
     assert store.is_excluded(device_hash, addon_devices) is True
     assert store.get_stationary_radius(device_hash, addon_devices, 25) == 0
-    assert store.get_unavailable_timeout(device_hash, addon_devices, 300) == 90
     assert store.get_stationary_radius("missing", addon_devices, 25) == 25
-    assert store.get_unavailable_timeout("missing", addon_devices, 300) == 300
     assert store.is_excluded("missing", addon_devices) is False
 
 

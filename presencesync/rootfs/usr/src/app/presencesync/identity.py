@@ -12,7 +12,7 @@ from . import state
 
 log = logging.getLogger(__name__)
 
-_DEVICE_KEYS = ("stationary_radius", "exclude", "unavailable_timeout")
+_DEVICE_KEYS = ("stationary_radius", "exclude")
 
 
 def hash_device_id(raw_id: str) -> str:
@@ -100,10 +100,6 @@ class DeviceIdentityStore:
 
     def get_stationary_radius(self, device_hash: str, addon_config, global_default: int) -> int:
         value = self.get_config(device_hash, addon_config).get("stationary_radius")
-        return global_default if value is None else int(value)
-
-    def get_unavailable_timeout(self, device_hash: str, addon_config, global_default: int) -> int:
-        value = self.get_config(device_hash, addon_config).get("unavailable_timeout")
         return global_default if value is None else int(value)
 
     def log_device_table(self) -> None:
