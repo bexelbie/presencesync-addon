@@ -189,8 +189,8 @@ class Extractor:
             if m:
                 bottles.append({"index": int(m.group(1)), "name": m.group(2)})
 
-        # Filter out pyicloud's fake escrow bottles (serial contains "FAKE")
-        bottles = [b for b in bottles if "FAKE" not in b.get("name", "")]
+        # Filter out export-findmy's own escrow bottle
+        bottles = [b for b in bottles if "F2LZN0FAKE00" not in b.get("name", "")]
 
         if bottles:
             self._status.phase = "awaiting_bottle"
