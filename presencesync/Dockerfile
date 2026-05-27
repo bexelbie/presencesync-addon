@@ -34,9 +34,6 @@ RUN mkdir -p /build/rustpush-local/apple-private-apis/clearadi/src \
 RUN git clone --depth 1 \
     https://github.com/bexelbie/export-findmy.git /build/export-findmy
 
-# Copy local source over the cloned repo (includes metadata.json changes)
-COPY export-findmy-src/ /build/export-findmy/src/
-
 # Rewrite Cargo.toml to use local paths for build
 WORKDIR /build/export-findmy
 RUN cat > Cargo.toml <<'EOF'
