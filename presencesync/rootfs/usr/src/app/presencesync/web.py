@@ -255,6 +255,7 @@ async def reset():
         setattr(s, "bundle_uploaded", False),
     ))
     coord = get_coord()
+    coord.icloud.reset()
     coord.apple.account = None
     coord.apple.accessories = []
     coord.apple.shared_accessories = []

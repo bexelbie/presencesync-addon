@@ -107,6 +107,15 @@ class ICloudClient:
         log.info("pyicloud login → state=%s", self.login_state)
         return self.login_state
 
+    def reset(self):
+        """Destroy the live session and clear persisted cookies."""
+        self._api = None
+        import shutil
+        if COOKIE_DIR.exists():
+            shutil.rmtree(COOKIE_DIR, ignore_errors=True)
+            COOKIE_DIR.mkdir(parents=True, exist_ok=True)
+        log.info("pyicloud session reset — cookies cleared")
+
     def submit_2fa(self, code: str) -> str:
         if self._api is None:
             raise RuntimeError("not logged in yet")
