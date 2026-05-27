@@ -62,6 +62,7 @@ jobs:
           build-args: |
             BUILD_FROM=${{ matrix.build_from }}
             BUILD_ARCH=${{ matrix.arch }}
+            CACHE_BUST=${{ github.sha }}
           tags: |
             ${{ env.IMAGE_BASE }}-${{ matrix.arch }}:${{ steps.version.outputs.version }}
             ${{ env.IMAGE_BASE }}-${{ matrix.arch }}:latest

@@ -14,6 +14,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev git ca-certificates protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
+# Cache-bust arg — change to force fresh git clones when deps update
+ARG CACHE_BUST=1
+
 # Clone our patched repos (no --recursive since we replace apple-private-apis)
 RUN git clone --branch presencesync --depth 1 \
     https://github.com/bexelbie/rustpush.git /build/rustpush-local \
