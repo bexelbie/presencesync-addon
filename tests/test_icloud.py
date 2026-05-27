@@ -66,10 +66,8 @@ class TestICloudClient:
             ],
             user_info={
                 "prsId": "my-prs",
-                "familyShareDetails": {
-                    "members": [
-                        {"prsId": "family-prs", "fullName": "Pat Example"},
-                    ],
+                "membersInfo": {
+                    "family-prs": {"firstName": "Pat", "lastName": "Example"},
                 },
             },
         )
@@ -104,7 +102,7 @@ class TestICloudClient:
             ],
             user_info={
                 "prsId": "my-prs",
-                "familyShareDetails": {"members": []},
+                "membersInfo": {},
             },
         )
         client = ICloudClient()
