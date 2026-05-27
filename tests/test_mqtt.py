@@ -208,3 +208,33 @@ def test_subscribe_commands_routes_callbacks(mock_state):
     callbacks["refresh"].assert_called_once_with()
     callbacks["fetch_items"].assert_called_once_with()
     callbacks["play_sound"].assert_called_once_with("a1b2c3d4e5f6")
+
+
+def test_publish_device_availability_online(mock_state):
+    publisher = _make_publisher()
+    publisher.publish_device_availability("a1b2c3d4e5f6", True)
+
+    call = publisher._client.publish.call_args
+    assert call.args[0] == "presencesync/a1b2c3d4e5f6/availability"
+    assert call.args[1] == "online"
+    assert call.kwargs.get("retain") is True
+
+
+def test_publish_device_availability_offline(mock_state):
+    publisher = _make_publisher()
+    publisher.publish_device_availability("a1b2c3d4e5f6", False)
+
+    call = publisher._client.publish.call_args
+    assert call.args[0] == "presencesync/a1b2c3d4e5f6/availability"
+    assert call.args[1] == "offline"
+    assert call.kwargs.get("retain") is True
+
+
+def test_publish_battery(mock_state):
+    publisher = _make_publisher()
+    publisher.publish_battery("a1b2c3d4e5f6", 73)
+
+    call = publisher._client.publish.call_args
+    assert call.args[0] == "presencesync/a1b2c3d4e5f6/battery"
+    assert call.args[1] == "73"
+    assert call.kwargs.get("retain") is True

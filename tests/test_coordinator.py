@@ -175,3 +175,105 @@ class TestIDeviceAvailability:
         phone1_id = store.get_hash("phone-1")
         assert coord._availability[phone1_id] is True
         assert all(v is True for v in coord._availability.values())
+
+
+class TestItemAvailability:
+    def _make_coord(self, mock_state):
+        coord = Coordinator.__new__(Coordinator)
+        coord._prev_idevice_ids = set()
+        coord._prev_item_ids = set()
+        coord._availability = {}
+        coord.mqtt = MagicMock()
+        coord.mqtt.publish_device_availability = MagicMock()
+        return coord
+
+    def _make_fix(self, identifier="item-1", name="Keys"):
+        from presencesync.apple import LocationFix
+        return LocationFix(
+            identifier=identifier,
+            name=name,
+            model="AirTag",
+            latitude=37.7749,
+            longitude=-122.4194,
+            horizontal_accuracy=5.0,
+            timestamp_unix=1700000000,
+        )
+
+    def test_first_fetch_marks_items_online(self, mock_state):
+        coord = self._make_coord(mock_state)
+        fixes = [self._make_fix("item-1", "Keys")]
+        coord._update_item_availability(fixes)
+
+        from presencesync import identity
+        store = identity.get()
+        device_id = store.get_hash("item-1")
+        assert coord._availability[device_id] is True
+
+    def test_disappeared_item_marked_offline(self, mock_state):
+        from presencesync import identity
+        coord = self._make_coord(mock_state)
+
+        fixes = [self._make_fix("item-1", "Keys"), self._make_fix("item-2", "Bag")]
+        coord._update_item_availability(fixes)
+
+        store = identity.get()
+        item2_id = store.get_hash("item-2")
+
+        # Second fetch: only item-1
+        fixes = [self._make_fix("item-1", "Keys")]
+        coord._update_item_availability(fixes)
+        assert coord._availability[item2_id] is False
+
+    def test_idevice_beacons_excluded_from_item_tracking(self, mock_state):
+        from presencesync.apple import LocationFix
+        coord = self._make_coord(mock_state)
+
+        fixes = [
+            LocationFix(identifier="l:/beacon-1", name="iPhone beacon",
+                       model=None, latitude=37.0, longitude=-122.0,
+                       horizontal_accuracy=5.0, timestamp_unix=1700000000),
+            LocationFix(identifier="me:/beacon-2", name="Watch beacon",
+                       model=None, latitude=37.0, longitude=-122.0,
+                       horizontal_accuracy=5.0, timestamp_unix=1700000000),
+            self._make_fix("item-1", "Keys"),
+        ]
+        coord._update_item_availability(fixes)
+
+        # Only item-1 should be in prev_item_ids, not the beacons
+        from presencesync import identity
+        store = identity.get()
+        item_id = store.get_hash("item-1")
+        assert coord._prev_item_ids == {item_id}
+
+
+class TestSetAvailability:
+    def test_publishes_on_state_change(self, mock_state):
+        coord = Coordinator.__new__(Coordinator)
+        coord._availability = {}
+        coord.mqtt = MagicMock()
+        coord.mqtt.publish_device_availability = MagicMock()
+
+        coord._set_availability("dev-1", True)
+        coord.mqtt.publish_device_availability.assert_called_once_with("dev-1", True)
+
+        coord.mqtt.publish_device_availability.reset_mock()
+        coord._set_availability("dev-1", False)
+        coord.mqtt.publish_device_availability.assert_called_once_with("dev-1", False)
+
+    def test_does_not_publish_when_unchanged(self, mock_state):
+        coord = Coordinator.__new__(Coordinator)
+        coord._availability = {"dev-1": True}
+        coord.mqtt = MagicMock()
+        coord.mqtt.publish_device_availability = MagicMock()
+
+        coord._set_availability("dev-1", True)
+        coord.mqtt.publish_device_availability.assert_not_called()
+
+    def test_force_publishes_even_when_unchanged(self, mock_state):
+        coord = Coordinator.__new__(Coordinator)
+        coord._availability = {"dev-1": True}
+        coord.mqtt = MagicMock()
+        coord.mqtt.publish_device_availability = MagicMock()
+
+        coord._set_availability("dev-1", True, force=True)
+        coord.mqtt.publish_device_availability.assert_called_once_with("dev-1", True)
