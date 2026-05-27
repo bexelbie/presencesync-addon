@@ -142,6 +142,17 @@ async def apple_login(body: dict):
         log.exception("pyicloud login failed")
         icloud_state = f"ERROR: {type(e).__name__}: {e}"
 
+    # If iCloud login succeeded, dismiss any auth failure notification and restart loops
+    if icloud_state == "logged_in":
+        coord._icloud_consecutive_failures = 0
+        await supervisor.dismiss_notification("presencesync_reauth_required")
+        if coord._stop_event.is_set():
+            coord._stop_event.clear()
+            coord._poll_task = coord._create_loop_task(coord._poll_loop(), "poll")
+            coord._refresh_task = coord._create_loop_task(coord._refresh_loop(), "refresh")
+            coord._item_task = coord._create_loop_task(coord._item_loop(), "items")
+            log.info("Polling loops restarted after successful re-authentication")
+
     return {"findmy_state": findmy_state, "icloud_state": icloud_state}
 
 

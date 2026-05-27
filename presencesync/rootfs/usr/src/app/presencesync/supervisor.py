@@ -1,5 +1,5 @@
 # ABOUTME: Queries Home Assistant Supervisor and Core APIs for MQTT and home metadata.
-# ABOUTME: Raises and dismisses repair issues so the add-on can surface setup problems in HA.
+# ABOUTME: Creates and dismisses persistent notifications to surface auth problems in HA.
 """Talk to HA's Supervisor + Core APIs to auto-discover sane defaults.
 
 Available inside any HA add-on that has `hassio_api: true` + `homeassistant_api: true`
@@ -92,45 +92,42 @@ async def discover_home() -> HomeInfo | None:
         return None
 
 
-async def create_repair(issue_id: str, title: str, message: str,
-                        severity: str = "warning", learn_more_url: str = "") -> bool:
-    """Raise a repair alert in HA's Repairs dashboard."""
+async def create_notification(notification_id: str, title: str, message: str) -> bool:
+    """Create a persistent notification visible in the HA UI."""
     if not _get_token():
         return False
     try:
         payload = {
-            "domain": "presencesync",
-            "issue_id": issue_id,
-            "is_fixable": False,
-            "severity": severity,
-            "translation_key": issue_id,
-            "translation_placeholders": {"title": title, "message": message},
+            "title": title,
+            "message": message,
+            "notification_id": notification_id,
         }
-        if learn_more_url:
-            payload["learn_more_url"] = learn_more_url
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
-            async with s.post(f"{SUPERVISOR_BASE}/core/api/issues",
-                              headers=_headers(), json=payload) as r:
-                if r.status in (200, 201):
-                    log.info("Repair alert created: %s", issue_id)
+            async with s.post(
+                f"{SUPERVISOR_BASE}/core/api/services/persistent_notification/create",
+                headers=_headers(), json=payload,
+            ) as r:
+                if r.status == 200:
+                    log.info("Persistent notification created: %s", notification_id)
                     return True
-                log.warning("Repair alert failed (%d): %s", r.status, await r.text())
+                log.warning("Notification create failed (%d): %s", r.status, await r.text())
                 return False
     except Exception:
-        log.exception("Failed to create repair alert")
+        log.exception("Failed to create persistent notification")
         return False
 
 
-async def dismiss_repair(issue_id: str) -> bool:
-    """Dismiss a previously raised repair alert."""
+async def dismiss_notification(notification_id: str) -> bool:
+    """Dismiss a persistent notification."""
     if not _get_token():
         return False
     try:
+        payload = {"notification_id": notification_id}
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
-            async with s.delete(
-                f"{SUPERVISOR_BASE}/core/api/issues/presencesync/{issue_id}",
-                headers=_headers()
+            async with s.post(
+                f"{SUPERVISOR_BASE}/core/api/services/persistent_notification/dismiss",
+                headers=_headers(), json=payload,
             ) as r:
-                return r.status in (200, 204)
+                return r.status == 200
     except Exception:
         return False

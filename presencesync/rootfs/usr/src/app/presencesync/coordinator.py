@@ -593,6 +593,7 @@ class Coordinator:
         settings = state.get()
         if not settings.apple.username or not settings.apple.password:
             log.warning("Skipping iCloud recovery; no stored credentials")
+            await self._enter_auth_failed_state()
             return
 
         try:
@@ -605,8 +606,24 @@ class Coordinator:
             log.info("iCloud session recovery: %s", login_state)
             if login_state == "logged_in":
                 self._icloud_consecutive_failures = 0
+                await supervisor.dismiss_notification("presencesync_reauth_required")
+                return
         except Exception:
             log.exception("iCloud session recovery failed")
+
+        await self._enter_auth_failed_state()
+
+    async def _enter_auth_failed_state(self):
+        """Stop polling and notify user that re-authentication is required."""
+        log.error("Authentication failed — stopping polling loops. "
+                  "Re-authenticate via the PresenceSync setup UI.")
+        await supervisor.create_notification(
+            "presencesync_reauth_required",
+            "PresenceSync: Re-authentication required",
+            "Apple session expired and automatic recovery failed. "
+            "Open the PresenceSync add-on and log in again to resume location tracking.",
+        )
+        self._stop_event.set()
 
     def _maybe_reset_icloud_server_context(self):
         now = time.time()
