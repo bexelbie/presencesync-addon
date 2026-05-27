@@ -25,9 +25,10 @@ jobs:
           - arch: amd64
             platform: linux/amd64
             build_from: ghcr.io/home-assistant/amd64-base-debian:bookworm
-          - arch: aarch64
-            platform: linux/arm64
-            build_from: ghcr.io/home-assistant/aarch64-base-debian:bookworm
+          # aarch64 disabled until amd64 build is stable
+          # - arch: aarch64
+          #   platform: linux/arm64
+          #   build_from: ghcr.io/home-assistant/aarch64-base-debian:bookworm
 
     steps:
       - name: Checkout
@@ -62,9 +63,7 @@ jobs:
           build-args: |
             BUILD_FROM=${{ matrix.build_from }}
             BUILD_ARCH=${{ matrix.arch }}
-            CACHE_BUST=${{ github.sha }}
           tags: |
             ${{ env.IMAGE_BASE }}-${{ matrix.arch }}:${{ steps.version.outputs.version }}
             ${{ env.IMAGE_BASE }}-${{ matrix.arch }}:latest
-          cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          no-cache: true

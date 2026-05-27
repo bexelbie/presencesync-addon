@@ -208,7 +208,8 @@ async function refreshStatus() {
 
     // Show/hide login form based on auth state
     const loggedIn = s.findmy_login_state.includes('LOGGED_IN') || s.icloud_login_state === 'logged_in';
-    if (loggedIn) {
+    const needs2fa = s.findmy_login_state.includes('REQUIRE_2FA') || s.icloud_login_state === 'needs_2fa';
+    if (loggedIn && !needs2fa) {
       document.getElementById('login-form').classList.add('hidden');
       document.getElementById('tfa-form').classList.add('hidden');
       document.getElementById('login-signed-in').classList.remove('hidden');
@@ -217,6 +218,11 @@ async function refreshStatus() {
       if (!emailEl.textContent || emailEl.textContent === '—') {
         emailEl.textContent = document.getElementById('apple-id').value || '✓ Signed in';
       }
+    } else if (needs2fa) {
+      document.getElementById('login-form').classList.add('hidden');
+      document.getElementById('tfa-form').classList.remove('hidden');
+      document.getElementById('login-signed-in').classList.add('hidden');
+      msg('login-msg', 'Check your trusted device for a verification code.', 'info');
     }
   } catch(e) {}
 }

@@ -25,7 +25,7 @@ logging.basicConfig(level=os.environ.get("PRESENCESYNC_LOG_LEVEL", "info").upper
 
 
 async def _auto_configure() -> None:
-    """Fill in MQTT broker credentials from HA's Supervisor APIs."""
+    """Fill in MQTT broker credentials from HA's Supervisor APIs or env vars."""
     mqtt_info = await supervisor.discover_mqtt()
     if mqtt_info:
         log.info("auto-discovered MQTT: %s:%s", mqtt_info.host, mqtt_info.port)
@@ -34,6 +34,18 @@ async def _auto_configure() -> None:
             x.mqtt.port = mqtt_info.port
             x.mqtt.username = mqtt_info.username
             x.mqtt.password = mqtt_info.password
+        await state.update(m)
+    elif os.environ.get("MQTT_HOST"):
+        host = os.environ["MQTT_HOST"]
+        port = int(os.environ.get("MQTT_PORT", "1883"))
+        username = os.environ.get("MQTT_USERNAME", "")
+        password = os.environ.get("MQTT_PASSWORD", "")
+        log.info("MQTT from env vars: %s:%s", host, port)
+        def m(x):
+            x.mqtt.host = host
+            x.mqtt.port = port
+            x.mqtt.username = username
+            x.mqtt.password = password
         await state.update(m)
 
 
