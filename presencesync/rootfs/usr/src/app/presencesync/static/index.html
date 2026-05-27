@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PresenceSync</title>
+<style>
+:root {
+  --primary: #03a9f4;
+  --bg: #f5f6fa;
+  --card-bg: #fff;
+  --text: #333;
+  --muted: #888;
+  --success: #4caf50;
+  --error: #f44336;
+  --warning: #ff9800;
+  --border: #e0e0e0;
+  --radius: 8px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg); color: var(--text);
+  padding: 16px; max-width: 640px; margin: 0 auto;
+  line-height: 1.5;
+}
+h1 { font-size: 1.4em; margin-bottom: 16px; }
+h2 { font-size: 1.1em; margin-bottom: 8px; color: var(--text); }
+.card {
+  background: var(--card-bg); border-radius: var(--radius);
+  padding: 16px; margin-bottom: 12px;
+  border: 1px solid var(--border);
+}
+.status-grid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 4px 12px; font-size: 0.9em;
+}
+.status-grid dt { color: var(--muted); }
+.status-grid dd { font-weight: 500; text-align: right; }
+.badge {
+  display: inline-block; padding: 2px 8px; border-radius: 12px;
+  font-size: 0.8em; font-weight: 600;
+}
+.badge-ok { background: #e8f5e9; color: var(--success); }
+.badge-warn { background: #fff3e0; color: var(--warning); }
+.badge-err { background: #ffebee; color: var(--error); }
+input, button, select {
+  display: block; width: 100%; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  font-size: 0.95em; margin-bottom: 8px;
+}
+input:focus { outline: 2px solid var(--primary); border-color: transparent; }
+button {
+  background: var(--primary); color: #fff; border: none;
+  cursor: pointer; font-weight: 600; transition: opacity .2s;
+}
+button:hover { opacity: 0.85; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.secondary { background: #eee; color: var(--text); }
+button.danger { background: var(--error); }
+.msg { padding: 8px 12px; border-radius: var(--radius); margin-bottom: 8px; font-size: 0.9em; }
+.msg-info { background: #e3f2fd; color: #1565c0; }
+.msg-error { background: #ffebee; color: var(--error); }
+.msg-success { background: #e8f5e9; color: var(--success); }
+.hidden { display: none; }
+.actions { display: flex; gap: 8px; }
+.actions button { flex: 1; }
+.signed-in { display: flex; align-items: center; gap: 8px; }
+.signed-in .email { font-weight: 500; flex: 1; }
+.steps { display: flex; gap: 4px; margin-bottom: 12px; }
+.step { flex: 1; height: 4px; border-radius: 2px; background: var(--border); }
+.step.done { background: var(--success); }
+.step.active { background: var(--primary); }
+.help-text { font-size: 0.85em; color: var(--muted); margin-bottom: 8px; }
+.spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin .6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<h1>🔵 PresenceSync</h1>
+
+<!-- Status Card -->
+<div class="card" id="status-card">
+  <h2>Status</h2>
+  <dl class="status-grid" id="status-grid">
+    <dt>MQTT</dt><dd id="s-mqtt">—</dd>
+    <dt>FindMy</dt><dd id="s-findmy">—</dd>
+    <dt>iCloud</dt><dd id="s-icloud">—</dd>
+    <dt>Anisette</dt><dd id="s-anisette">—</dd>
+    <dt>AirTags</dt><dd id="s-airtags">—</dd>
+    <dt>iDevices</dt><dd id="s-devices">—</dd>
+  </dl>
+  <div class="actions" style="margin-top:12px">
+    <button class="secondary" onclick="pollNow()">↻ Poll Now</button>
+  </div>
+</div>
+
+<!-- Login Card -->
+<div class="card" id="login-card">
+  <h2>Apple Account</h2>
+  <div id="login-msg"></div>
+  <!-- Already signed in -->
+  <div id="login-signed-in" class="hidden">
+    <div class="signed-in">
+      <span class="email" id="signed-in-email"></span>
+      <button class="danger" style="width:auto;padding:6px 12px;font-size:0.85em" onclick="doReset()">Sign Out</button>
+    </div>
+  </div>
+  <!-- Login form -->
+  <div id="login-form">
+    <input id="apple-id" type="email" placeholder="Apple ID (email)">
+    <input id="apple-pw" type="password" placeholder="Password">
+    <button onclick="doLogin()">Sign In</button>
+  </div>
+  <!-- 2FA form -->
+  <div id="tfa-form" class="hidden">
+    <p class="help-text">Enter the 6-digit verification code.<br>
+    <strong>No push notification?</strong> That's normal — unofficial API clients often don't trigger one. Generate a code manually:<br>
+    iPhone: <strong>Settings → [your name] → Sign-In & Security → Get Verification Code</strong><br>
+    <em>Tip: If the code keeps failing, try putting your phone in Airplane Mode briefly, generate the code, then turn Airplane Mode off and submit it. This prevents Apple from auto-consuming the code via push before you can enter it.</em></p>
+    <input id="tfa-code" type="text" placeholder="6-digit code" maxlength="6" pattern="[0-9]*" inputmode="numeric">
+    <button onclick="doTfa()">Verify</button>
+  </div>
+</div>
+
+<!-- Extraction Card -->
+<div class="card" id="extract-card">
+  <h2>Key Extraction</h2>
+  <!-- Step indicator -->
+  <div class="steps" id="extract-steps">
+    <div class="step" id="step-1"></div>
+    <div class="step" id="step-2"></div>
+    <div class="step" id="step-3"></div>
+    <div class="step" id="step-4"></div>
+    <div class="step" id="step-5"></div>
+  </div>
+  <div id="extract-msg"></div>
+  <!-- Idle state -->
+  <div id="extract-idle">
+    <p class="help-text">Extract AirTag private keys from iCloud Keychain. This is a separate authentication from the login above — Apple requires it because the extractor joins the Keychain trust circle directly.</p>
+    <button onclick="startExtract()">Start Extraction</button>
+  </div>
+  <!-- Password (step 1) -->
+  <div id="extract-pw" class="hidden">
+    <p class="help-text">Step 1 of 5 — Authenticate to iCloud Keychain</p>
+    <input id="ext-password" type="password" placeholder="Apple ID password">
+    <button onclick="extPassword()">Submit Password</button>
+  </div>
+  <!-- 2FA (step 2) -->
+  <div id="extract-2fa" class="hidden">
+    <p class="help-text">Step 2 of 5 — A new 2FA code is needed because the extractor authenticates as a separate device. Check your trusted device for a fresh code.<br>
+    <em>Tip: Put your phone in Airplane Mode, generate the code (Settings → [your name] → Sign-In & Security → Get Verification Code), then turn Airplane Mode off and submit.</em></p>
+    <input id="ext-2fa" type="text" placeholder="6-digit code" maxlength="6" inputmode="numeric">
+    <button onclick="ext2fa()">Submit Code</button>
+  </div>
+  <!-- Bottle selection (step 3) -->
+  <div id="extract-bottle" class="hidden">
+    <p class="help-text">Step 3 of 5 — Choose which device's escrow backup to use. Pick a device whose passcode you know.</p>
+    <select id="ext-bottle-select"></select>
+    <button onclick="extBottle()">Select Device</button>
+  </div>
+  <!-- Passcode (step 4) -->
+  <div id="extract-passcode" class="hidden">
+    <p class="help-text">Step 4 of 5 — Enter the screen lock passcode of the device you selected above.</p>
+    <input id="ext-passcode" type="text" placeholder="Device passcode" inputmode="numeric">
+    <button onclick="extPasscode()">Unlock</button>
+  </div>
+  <!-- Done (step 5 is handled via message) -->
+</div>
+
+<script>
+const BASE = '';
+let currentStatus = null;
+
+async function api(path, opts = {}) {
+  const r = await fetch(BASE + path, {
+    headers: {'Content-Type': 'application/json', ...opts.headers},
+    ...opts
+  });
+  return r.json();
+}
+
+function badge(text, type) {
+  return `<span class="badge badge-${type}">${text}</span>`;
+}
+
+function msg(el, text, type = 'info') {
+  document.getElementById(el).innerHTML = text ? `<div class="msg msg-${type}">${text}</div>` : '';
+}
+
+function setStep(n) {
+  for (let i = 1; i <= 5; i++) {
+    const el = document.getElementById('step-' + i);
+    el.className = 'step' + (i < n ? ' done' : i === n ? ' active' : '');
+  }
+}
+
+async function refreshStatus() {
+  try {
+    const s = await api('/api/status');
+    currentStatus = s;
+    document.getElementById('s-mqtt').innerHTML = s.mqtt_connected ? badge('Connected','ok') : badge('Disconnected','err');
+    document.getElementById('s-findmy').innerHTML = s.findmy_login_state.includes('LOGGED_IN') ? badge('OK','ok') : badge(s.findmy_login_state,'warn');
+    document.getElementById('s-icloud').innerHTML = s.icloud_login_state === 'logged_in' ? badge('OK','ok') : badge(s.icloud_login_state,'warn');
+    document.getElementById('s-anisette').innerHTML = s.anisette_running ? badge('Running','ok') : badge('Stopped','warn');
+    document.getElementById('s-airtags').textContent = `${s.airtags_owned} owned, ${s.airtags_shared} shared`;
+    document.getElementById('s-devices').textContent = `${s.device_fixes} tracked`;
+
+    // Show/hide login form based on auth state
+    const loggedIn = s.findmy_login_state.includes('LOGGED_IN') || s.icloud_login_state === 'logged_in';
+    if (loggedIn) {
+      document.getElementById('login-form').classList.add('hidden');
+      document.getElementById('tfa-form').classList.add('hidden');
+      document.getElementById('login-signed-in').classList.remove('hidden');
+      // Try to show email from input or placeholder
+      const emailEl = document.getElementById('signed-in-email');
+      if (!emailEl.textContent || emailEl.textContent === '—') {
+        emailEl.textContent = document.getElementById('apple-id').value || '✓ Signed in';
+      }
+    }
+  } catch(e) {}
+}
+
+async function doLogin() {
+  const id = document.getElementById('apple-id').value;
+  const pw = document.getElementById('apple-pw').value;
+  if (!id || !pw) return msg('login-msg', 'Enter email and password', 'error');
+  msg('login-msg', '<span class="spinner"></span> Signing in...', 'info');
+  const r = await api('/api/apple/login', {method:'POST', body: JSON.stringify({username:id, password:pw})});
+  if (r.findmy_state?.includes('REQUIRE_2FA') || r.icloud_state === 'needs_2fa') {
+    document.getElementById('login-form').classList.add('hidden');
+    document.getElementById('tfa-form').classList.remove('hidden');
+    msg('login-msg', 'Check your trusted device for a verification code.', 'info');
+  } else if (r.findmy_state?.includes('LOGGED_IN')) {
+    msg('login-msg', 'Signed in successfully!', 'success');
+    document.getElementById('login-form').classList.add('hidden');
+    document.getElementById('login-signed-in').classList.remove('hidden');
+    document.getElementById('signed-in-email').textContent = document.getElementById('apple-id').value;
+    refreshStatus();
+  } else {
+    msg('login-msg', `Login failed: FindMy=${r.findmy_state}, iCloud=${r.icloud_state}`, 'error');
+  }
+}
+
+async function doTfa() {
+  const code = document.getElementById('tfa-code').value;
+  if (!code) return;
+  msg('login-msg', '<span class="spinner"></span> Verifying...', 'info');
+  const r = await api('/api/apple/2fa/submit', {method:'POST', body: JSON.stringify({code})});
+  if (r.findmy_state?.includes('LOGGED_IN') || r.icloud_state === 'logged_in') {
+    msg('login-msg', 'Authentication complete!', 'success');
+    document.getElementById('tfa-form').classList.add('hidden');
+    document.getElementById('login-signed-in').classList.remove('hidden');
+    document.getElementById('signed-in-email').textContent = document.getElementById('apple-id').value || '✓ Signed in';
+    refreshStatus();
+  } else {
+    msg('login-msg', `2FA failed: FindMy=${r.findmy_state}, iCloud=${r.icloud_state}`, 'error');
+  }
+}
+
+async function doReset() {
+  if (!confirm('Sign out and clear Apple credentials?')) return;
+  await api('/api/reset', {method:'POST'});
+  document.getElementById('login-signed-in').classList.add('hidden');
+  document.getElementById('login-form').classList.remove('hidden');
+  document.getElementById('apple-id').value = '';
+  document.getElementById('apple-pw').value = '';
+  msg('login-msg', 'Signed out.', 'info');
+  refreshStatus();
+}
+
+async function pollNow() {
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = '↻ Polling...';
+  await api('/api/poll-now', {method:'POST'});
+  await refreshStatus();
+  btn.disabled = false;
+  btn.textContent = '↻ Poll Now';
+}
+
+// --- Extraction ---
+const PHASE_STEP = {waiting_password: 1, waiting_2fa: 2, waiting_bottle: 3, waiting_passcode: 4, done: 5};
+
+async function startExtract() {
+  const appleId = document.getElementById('apple-id').value || '';
+  msg('extract-msg', '<span class="spinner"></span> Starting extraction...', 'info');
+  setStep(1);
+  const r = await api('/api/extract/start', {method:'POST', body: JSON.stringify({apple_id: appleId})});
+  handleExtractPhase(r);
+}
+
+function handleExtractPhase(r) {
+  // Hide all sub-forms
+  ['extract-idle','extract-pw','extract-2fa','extract-bottle','extract-passcode'].forEach(
+    id => document.getElementById(id).classList.add('hidden'));
+
+  if (r.error) {
+    msg('extract-msg', r.error, 'error');
+    setStep(0);
+    document.getElementById('extract-idle').classList.remove('hidden');
+    return;
+  }
+
+  const step = PHASE_STEP[r.phase] || 0;
+  setStep(step);
+
+  switch(r.phase) {
+    case 'waiting_password':
+      msg('extract-msg', '', 'info');
+      // Pre-fill from login form if available
+      const pw = document.getElementById('apple-pw').value;
+      if (pw) document.getElementById('ext-password').value = pw;
+      document.getElementById('extract-pw').classList.remove('hidden');
+      break;
+    case 'waiting_2fa':
+      msg('extract-msg', '', 'info');
+      document.getElementById('extract-2fa').classList.remove('hidden');
+      break;
+    case 'waiting_bottle':
+      msg('extract-msg', '', 'info');
+      const sel = document.getElementById('ext-bottle-select');
+      sel.innerHTML = (r.bottles||[]).map((b,i) => `<option value="${i}">${b}</option>`).join('');
+      document.getElementById('extract-bottle').classList.remove('hidden');
+      break;
+    case 'waiting_passcode':
+      msg('extract-msg', '', 'info');
+      document.getElementById('extract-passcode').classList.remove('hidden');
+      break;
+    case 'done':
+      msg('extract-msg', `✓ Extracted ${r.extracted_count} key${r.extracted_count === 1 ? '' : 's'}! Tracking will begin within 60 seconds.`, 'success');
+      document.getElementById('extract-idle').classList.remove('hidden');
+      refreshStatus();
+      break;
+    default:
+      msg('extract-msg', r.message || 'Unknown state', 'warning');
+      document.getElementById('extract-idle').classList.remove('hidden');
+  }
+}
+
+async function extPassword() {
+  const pw = document.getElementById('ext-password').value;
+  if (!pw) return;
+  msg('extract-msg', '<span class="spinner"></span> Authenticating...', 'info');
+  handleExtractPhase(await api('/api/extract/password', {method:'POST', body: JSON.stringify({password:pw})}));
+}
+async function ext2fa() {
+  const code = document.getElementById('ext-2fa').value;
+  if (!code) return;
+  msg('extract-msg', '<span class="spinner"></span> Verifying...', 'info');
+  handleExtractPhase(await api('/api/extract/2fa', {method:'POST', body: JSON.stringify({code})}));
+}
+async function extBottle() {
+  const idx = document.getElementById('ext-bottle-select').value;
+  msg('extract-msg', '<span class="spinner"></span> Selecting device...', 'info');
+  handleExtractPhase(await api('/api/extract/bottle', {method:'POST', body: JSON.stringify({index: parseInt(idx)})}));
+}
+async function extPasscode() {
+  const pc = document.getElementById('ext-passcode').value;
+  if (!pc) return;
+  msg('extract-msg', '<span class="spinner"></span> Unlocking escrow...', 'info');
+  handleExtractPhase(await api('/api/extract/passcode', {method:'POST', body: JSON.stringify({passcode:pc})}));
+}
+
+// Init
+refreshStatus();
+setInterval(refreshStatus, 30000);
+</script>
+</body>
+</html>
