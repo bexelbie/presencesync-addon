@@ -259,7 +259,7 @@ class MqttPublisher:
             "identifiers": [self._device_unique_id(device_id)],
             "name": name,
             "manufacturer": "Apple",
-            "model": model,
+            "model": model or "Find My Item",
             "via_device": HUB_IDENTIFIER,
         }
 

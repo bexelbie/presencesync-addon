@@ -339,9 +339,11 @@ async def extract_passcode(body: dict):
     ext = _extractor_mod.get()
     result = await ext.submit_passcode(passcode)
     if result.phase == "done":
-        # Reload keys after successful extraction
+        # Reload keys and trigger initial data cycle
         coord = get_coord()
         coord.apple.load_keys_dir()
+        coord._reload_cloudkit_mapping()
+        asyncio.create_task(coord._initial_data_fetch())
         # Dismiss the repair alert now that keys are loaded
         await supervisor.dismiss_repair("extraction_needed")
     return {

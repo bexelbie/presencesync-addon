@@ -105,8 +105,8 @@ class Extractor:
         assert self._process.stdin is not None
         self._process.stdin.write((password + "\n").encode())
         await self._process.stdin.drain()
-        self._status.phase = "awaiting_2fa"
-        self._status.message = "Enter your 2FA code"
+        # Wait for output — binary may skip 2FA if session is cached
+        await self._wait_for_next_prompt(timeout=10)
         return self._status
 
     async def submit_2fa(self, code: str) -> ExtractionStatus:
@@ -116,13 +116,30 @@ class Extractor:
         assert self._process.stdin is not None
         self._process.stdin.write((code + "\n").encode())
         await self._process.stdin.drain()
-        # After 2FA, process will show bottle options or start extracting
+        # Wait for bottle list or completion
+        await self._wait_for_next_prompt(timeout=15)
+        return self._status
+
+    async def _wait_for_next_prompt(self, timeout: float = 10):
+        """Poll output to detect what the binary is waiting for next."""
+        deadline = asyncio.get_event_loop().time() + timeout
+        prev_lines = len(self._output_lines)
         self._status.phase = "running"
         self._status.message = "Processing..."
-        # Wait briefly for bottle list
-        await asyncio.sleep(3)
-        self._parse_bottles()
-        return self._status
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
+            # Check if process exited
+            if self._process and self._process.returncode is not None:
+                self._finalize()
+                return
+            # Check for new output indicating a prompt
+            if len(self._output_lines) > prev_lines:
+                prev_lines = len(self._output_lines)
+                if self._detect_2fa_prompt():
+                    return
+                self._parse_bottles()
+                if self._status.phase == "awaiting_bottle":
+                    return
 
     async def submit_bottle_choice(self, index: int) -> ExtractionStatus:
         """Select which escrow bottle to use."""
@@ -152,17 +169,28 @@ class Extractor:
         self._finalize()
         return self._status
 
+    def _detect_2fa_prompt(self) -> bool:
+        """Check if binary is asking for a 2FA code."""
+        for line in self._output_lines:
+            lower = line.lower()
+            if "2fa" in lower or "verification code" in lower or "two-factor" in lower:
+                self._status.phase = "awaiting_2fa"
+                self._status.message = "Enter your 2FA code"
+                return True
+        return False
+
     def _parse_bottles(self):
         """Parse bottle list from output."""
         bottles = []
-        bottle_re = re.compile(r"(\d+)\)\s+(.+)")
+        # Binary outputs: [N] SERIAL (Device Name)
+        bottle_re = re.compile(r"\[(\d+)\]\s+(.+)")
         for line in self._output_lines:
             m = bottle_re.match(line.strip())
             if m:
                 bottles.append({"index": int(m.group(1)), "name": m.group(2)})
 
-        # Filter out our fake "HA iDevice" bottle
-        bottles = [b for b in bottles if "HA iDevice" not in b.get("name", "")]
+        # Filter out pyicloud's fake escrow bottles (serial contains "FAKE")
+        bottles = [b for b in bottles if "FAKE" not in b.get("name", "")]
 
         if bottles:
             self._status.phase = "awaiting_bottle"

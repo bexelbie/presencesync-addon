@@ -120,13 +120,13 @@ class ICloudClient:
     def _extract_fixes(self, mgr) -> list[DeviceFix]:
         out: list[DeviceFix] = []
         user_info = getattr(mgr, "_user_info", None) or {}
-        family_details = user_info.get("familyShareDetails") or {}
-        members = family_details.get("members") or []
+        members_info = user_info.get("membersInfo") or {}
         owner_by_prs_id = {}
-        for member in members:
-            prs_id = member.get("prsId")
-            full_name = member.get("fullName")
-            if prs_id and full_name:
+        for prs_id, info in members_info.items():
+            first = info.get("firstName", "")
+            last = info.get("lastName", "")
+            full_name = f"{first} {last}".strip()
+            if full_name:
                 owner_by_prs_id[prs_id] = full_name
         user_prs_id = user_info.get("prsId")
 

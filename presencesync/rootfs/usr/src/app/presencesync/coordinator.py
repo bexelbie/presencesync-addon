@@ -82,6 +82,7 @@ class Coordinator:
         self._metadata_dir: Path = Path(KEYS_DIR)
         self._ck_to_stable = _load_cloudkit_to_stable_map(self._metadata_dir)
 
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._poll_task: asyncio.Task | None = None
         self._refresh_task: asyncio.Task | None = None
         self._item_task: asyncio.Task | None = None
@@ -98,6 +99,7 @@ class Coordinator:
         if any(task is not None and not task.done() for task in (self._poll_task, self._refresh_task, self._item_task)):
             return
 
+        self._loop = asyncio.get_running_loop()
         self._stop_event.clear()
 
         await self._auto_discover_mqtt()
@@ -119,9 +121,9 @@ class Coordinator:
         self._reload_cloudkit_mapping()
         await self._resume_icloud_session()
 
-        await self._do_refresh()
-        await self._do_fetch_items()
-        identity.get().log_device_table()
+        has_keys = bool(self.apple.accessories or self.apple.shared_accessories)
+        if has_keys:
+            await self._initial_data_fetch()
 
         self._poll_task = self._create_loop_task(self._poll_loop(), "poll")
         self._refresh_task = self._create_loop_task(self._refresh_loop(), "refresh")
@@ -147,6 +149,25 @@ class Coordinator:
         self._command_tasks.clear()
 
         self.mqtt.stop()
+
+    async def _initial_data_fetch(self):
+        """Run initial refresh + item fetch + warmup polls after keys are available."""
+        await self._do_refresh()
+        await self._do_fetch_items()
+        identity.get().log_device_table()
+        # Apple needs time to wake devices after refresh.
+        # Poll at +30s and +60s to pick up trickle-in data.
+        self._create_loop_task(self._warmup_polls(), "warmup")
+
+    async def _warmup_polls(self):
+        """Poll at +30s and +60s to catch trickle-in data after a refresh."""
+        for delay in (30, 30):
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
+                return
+            except asyncio.TimeoutError:
+                log.info("Warmup poll")
+                await self._do_poll()
 
     async def _poll_loop(self):
         while not self._stop_event.is_set():
@@ -299,7 +320,7 @@ class Coordinator:
             has_play_sound=True,
         )
         self._publish_location(device_id, attrs, source_fix=d)
-        if d.battery_level is not None:
+        if d.battery_level is not None and d.battery_level > 0:
             self._publish_battery(device_id, int(d.battery_level * 100))
 
         self._published_timestamps[device_id] = max(
@@ -320,10 +341,11 @@ class Coordinator:
             if fmi_ts >= fix.timestamp_unix:
                 return
             fmi_id = self._fmi_id_by_beacon_id.get(ident)
-            if fmi_id:
-                device_id = store.get_hash(fmi_id)
-            else:
-                device_id = store.register(ident, fix.name, "item_beacon")
+            if not fmi_id:
+                # No correlation to FMiP device — skip to avoid duplicate HA entries.
+                # FMiP is primary for iDevices; beacon data only publishes when correlated.
+                return
+            device_id = store.get_hash(fmi_id)
         else:
             device_id = store.register(ident, fix.name, "item")
 
@@ -347,13 +369,15 @@ class Coordinator:
         if fix.shared_date:
             attrs["shared_date"] = fix.shared_date
 
-        self._publish_device_discovery(
-            device_id=device_id,
-            name=fix.name,
-            model=fix.model,
-            has_battery=False,
-            has_play_sound=False,
-        )
+        # Skip discovery for correlated iDevice beacons — FMiP already published it
+        if not is_idevice_beacon:
+            self._publish_device_discovery(
+                device_id=device_id,
+                name=fix.name,
+                model=fix.model,
+                has_battery=False,
+                has_play_sound=False,
+            )
         self._publish_location(device_id, attrs, source_fix=fix)
 
         self._published_timestamps[device_id] = max(
@@ -626,12 +650,20 @@ class Coordinator:
         task.add_done_callback(self._log_background_error)
         return task
 
-    def _schedule(self, coro) -> asyncio.Task:
-        task = asyncio.create_task(coro)
+    def _schedule(self, coro):
+        """Schedule a coroutine from any thread (e.g. paho MQTT callbacks)."""
+        loop = self._loop
+        if loop is None:
+            log.error("Cannot schedule coroutine: event loop not set")
+            coro.close()
+            return
+        loop.call_soon_threadsafe(self._create_tracked_task, coro)
+
+    def _create_tracked_task(self, coro):
+        task = asyncio.ensure_future(coro)
         self._command_tasks.add(task)
         task.add_done_callback(self._command_tasks.discard)
         task.add_done_callback(self._log_background_error)
-        return task
 
     @staticmethod
     def _log_background_error(task: asyncio.Task):

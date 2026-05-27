@@ -34,6 +34,9 @@ RUN mkdir -p /build/rustpush-local/apple-private-apis/clearadi/src \
 RUN git clone --depth 1 \
     https://github.com/bexelbie/export-findmy.git /build/export-findmy
 
+# Copy local source over the cloned repo (includes metadata.json changes)
+COPY export-findmy-src/ /build/export-findmy/src/
+
 # Rewrite Cargo.toml to use local paths for build
 WORKDIR /build/export-findmy
 RUN cat > Cargo.toml <<'EOF'
@@ -66,7 +69,7 @@ RUN cargo build --release \
     && strip /usr/local/bin/export-findmy
 
 # ─── Stage 2: Extract anisette binary from its Docker image ──────────────────
-FROM dadoum/anisette-v3-server:latest AS anisette-source
+FROM dadoum/anisette-v3-server@sha256:1e20384985d3c49965f444bef39d627768dacc39ea0dca91f2a535edb7591ba3 AS anisette-source
 
 # ─── Stage 3: Final image ────────────────────────────────────────────────────
 FROM ${BUILD_FROM}
@@ -87,7 +90,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Python packages
 RUN pip3 install --no-cache-dir --break-system-packages \
-    findmy>=0.7.0 \
+    findmy==0.10.0 \
     "pyicloud @ git+https://github.com/timlaing/pyicloud.git@180e57c2cbda605ef3c042c3927d7772444676fe" \
     paho-mqtt>=2.0 \
     "fastapi>=0.110" \
