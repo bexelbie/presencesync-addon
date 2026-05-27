@@ -44,6 +44,9 @@ class Extractor:
         self._status = ExtractionStatus()
         self._output_lines: list[str] = []
         self._reader_task: asyncio.Task | None = None
+        self._last_bottle_index: int | None = None
+        self._last_apple_id: str = ""
+        self._last_server_url: str = ""
 
     @property
     def status(self) -> ExtractionStatus:
@@ -64,6 +67,9 @@ class Extractor:
 
         if not EXPORT_BINARY.exists():
             return ExtractionStatus(phase="error", error="export-findmy binary not found")
+
+        self._last_apple_id = apple_id
+        self._last_server_url = server_url
 
         KEYS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -146,6 +152,7 @@ class Extractor:
         if not self._process or self._process.returncode is not None:
             return ExtractionStatus(phase="error", error="no active extraction")
         assert self._process.stdin is not None
+        self._last_bottle_index = index
         self._process.stdin.write((str(index) + "\n").encode())
         await self._process.stdin.drain()
         self._status.phase = "awaiting_passcode"
@@ -154,8 +161,9 @@ class Extractor:
 
     async def submit_passcode(self, passcode: str) -> ExtractionStatus:
         """Send the device passcode to unlock the escrow bottle."""
+        # Retry case: process died from wrong passcode, restart transparently
         if not self._process or self._process.returncode is not None:
-            return ExtractionStatus(phase="error", error="no active extraction")
+            return await self._retry_with_passcode(passcode)
         assert self._process.stdin is not None
         self._process.stdin.write((passcode + "\n").encode())
         await self._process.stdin.drain()
@@ -167,6 +175,53 @@ class Extractor:
         except asyncio.TimeoutError:
             pass
         self._finalize()
+        return self._status
+
+    async def _retry_with_passcode(self, passcode: str) -> ExtractionStatus:
+        """Restart extraction and auto-advance to submit a new passcode."""
+        from . import state as state_mod
+        apple_id = self._last_apple_id
+        server_url = self._last_server_url
+        bottle_index = self._last_bottle_index
+
+        if not apple_id or bottle_index is None:
+            return ExtractionStatus(phase="error", error="cannot retry — missing context")
+
+        # Restart extraction
+        result = await self.start_extraction(apple_id, server_url)
+        if result.phase == "error":
+            return result
+
+        # Auto-submit cached password
+        cached_pw = state_mod.get().apple.password
+        if cached_pw and result.phase == "awaiting_password":
+            result = await self.submit_password(cached_pw)
+            if result.phase == "error":
+                return result
+
+        # Skip 2FA if cached session advanced past it
+        if result.phase == "awaiting_2fa":
+            # Can't auto-advance past 2FA — ask user to start over
+            return ExtractionStatus(phase="error", error="session expired, please start extraction again")
+
+        # Auto-submit bottle
+        if result.phase == "awaiting_bottle":
+            result = await self.submit_bottle_choice(bottle_index)
+            if result.phase == "error":
+                return result
+
+        # Now submit the passcode
+        if result.phase == "awaiting_passcode":
+            self._process.stdin.write((passcode + "\n").encode())
+            await self._process.stdin.drain()
+            self._status.phase = "running"
+            self._status.message = "Extracting keys..."
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=120)
+            except asyncio.TimeoutError:
+                pass
+            self._finalize()
+
         return self._status
 
     def _detect_2fa_prompt(self) -> bool:
@@ -183,11 +238,12 @@ class Extractor:
         """Parse bottle list from output."""
         bottles = []
         # Binary outputs: [N] SERIAL (Device Name)
-        bottle_re = re.compile(r"\[(\d+)\]\s+(.+)")
+        bottle_re = re.compile(r"\[(\d+)\]\s+(\S+)\s+\((.+)\)")
         for line in self._output_lines:
             m = bottle_re.match(line.strip())
             if m:
-                bottles.append({"index": int(m.group(1)), "name": m.group(2)})
+                idx, serial, name = int(m.group(1)), m.group(2), m.group(3)
+                bottles.append({"index": idx, "name": f"{name} ({serial})"})
 
         # Filter out export-findmy's own escrow bottle
         bottles = [b for b in bottles if "F2LZN0FAKE00" not in b.get("name", "")]
@@ -200,7 +256,6 @@ class Extractor:
     def _finalize(self):
         """Check results after process completes."""
         if self._process and self._process.returncode == 0:
-            # Count extracted plists
             plists = list(KEYS_DIR.glob("*.plist"))
             self._status = ExtractionStatus(
                 phase="done",
@@ -208,8 +263,15 @@ class Extractor:
                 extracted_count=len(plists),
             )
         else:
-            error = "\n".join(self._output_lines[-20:]) if self._output_lines else "unknown error"
-            self._status = ExtractionStatus(phase="error", error=error)
+            # Detect passcode failure specifically
+            output_tail = "\n".join(self._output_lines[-20:]) if self._output_lines else ""
+            if "Authentication failed" in output_tail or "EscrowError" in output_tail:
+                self._status = ExtractionStatus(
+                    phase="awaiting_passcode",
+                    message="Wrong passcode — try again",
+                )
+            else:
+                self._status = ExtractionStatus(phase="error", error=output_tail or "unknown error")
 
     async def _read_output(self):
         """Read subprocess output line by line."""

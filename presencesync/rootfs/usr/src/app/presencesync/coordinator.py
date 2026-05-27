@@ -69,6 +69,9 @@ class Coordinator:
         self.mqtt = MqttPublisher()
 
         self.last_run_unix: int = 0
+        self.last_poll_unix: int = 0
+        self.last_refresh_unix: int = 0
+        self.last_item_fetch_unix: int = 0
         self.last_fixes: list[LocationFix] = []
         self.last_device_fixes: list[DeviceFix] = []
 
@@ -128,13 +131,13 @@ class Coordinator:
         self._load_known_devices()
         await self._resume_icloud_session()
 
-        has_keys = bool(self.apple.accessories or self.apple.shared_accessories)
-        if has_keys:
-            await self._initial_data_fetch()
-
         self._poll_task = self._create_loop_task(self._poll_loop(), "poll")
         self._refresh_task = self._create_loop_task(self._refresh_loop(), "refresh")
         self._item_task = self._create_loop_task(self._item_loop(), "items")
+
+        has_keys = bool(self.apple.accessories or self.apple.shared_accessories)
+        if has_keys:
+            self._create_loop_task(self._initial_data_fetch(), "initial-fetch")
 
     async def stop(self):
         self._stop_event.set()
@@ -236,6 +239,7 @@ class Coordinator:
 
             self.last_device_fixes = device_fixes
             self.last_run_unix = int(time.time())
+            self.last_poll_unix = self.last_run_unix
             for device_fix in device_fixes:
                 await self._process_idevice(device_fix)
             self._update_idevice_availability(device_fixes)
@@ -259,6 +263,7 @@ class Coordinator:
 
             self.last_device_fixes = device_fixes
             self.last_run_unix = int(time.time())
+            self.last_refresh_unix = self.last_run_unix
             for device_fix in device_fixes:
                 await self._process_idevice(device_fix)
 
@@ -284,6 +289,7 @@ class Coordinator:
 
             self.last_fixes = fixes
             self.last_run_unix = int(time.time())
+            self.last_item_fetch_unix = self.last_run_unix
             for fix in fixes:
                 await self._process_item(fix)
             self._update_item_availability(fixes)

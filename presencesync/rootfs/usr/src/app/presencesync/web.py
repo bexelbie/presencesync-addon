@@ -108,22 +108,58 @@ async def status():
         "findmy_login_state": str(coord.apple.last_login_state),
         "icloud_login_state": coord.icloud.login_state,
         "mqtt_connected": coord.mqtt.connected,
-        "airtags_owned": len(coord.apple.accessories),
-        "airtags_shared": len(coord.apple.shared_accessories),
-        "last_poll_unix": coord.last_run_unix,
+        "airtags_tracked": len(coord._prev_item_ids),
+        "idevices_tracked": len(coord._prev_idevice_ids),
+        "device_fixes": len(coord.last_device_fixes),
+        "last_poll_unix": coord.last_poll_unix,
+        "last_refresh_unix": coord.last_refresh_unix,
+        "last_item_fetch_unix": coord.last_item_fetch_unix,
+        "poll_interval": int(state.get_addon_config().poll_interval),
+        "refresh_interval": int(state.get_addon_config().refresh_interval),
+        "item_poll_interval": int(state.get_addon_config().item_poll_interval),
         "anisette_running": mgr.running,
         "extractor_available": _extractor_mod.get().available,
-        "addon_config": state.get_addon_config().__dict__,
+        "apple_username": state.get().apple.username or "",
     }
+
+
+# ─── Manual triggers ──────────────────────────────────────────────────────────
+
+@app.post("/api/poll-now")
+async def poll_now():
+    """Trigger an immediate iDevice poll (lightweight, cached positions)."""
+    coord = get_coord()
+    await coord._do_poll()
+    return {"ok": True}
+
+
+@app.post("/api/refresh-now")
+async def refresh_now():
+    """Trigger an immediate iDevice refresh (forces location update)."""
+    coord = get_coord()
+    await coord._do_refresh()
+    return {"ok": True}
+
+
+@app.post("/api/fetch-items-now")
+async def fetch_items_now():
+    """Trigger an immediate AirTag/item fetch."""
+    coord = get_coord()
+    await coord._do_fetch_items()
+    return {"ok": True}
 
 
 # ─── Apple Login + 2FA ────────────────────────────────────────────────────────
 
 @app.post("/api/apple/login")
 async def apple_login(body: dict):
-    """Authenticate to both findmy.py (AirTags) and pyicloud (iDevices)."""
+    """Authenticate to both findmy.py (AirTags) and pyicloud (iDevices).
+    
+    Optionally accepts a 2FA code to submit in the same request.
+    """
     username = body.get("username") or ""
     password = body.get("password") or ""
+    code = body.get("code") or ""
     if not username or not password:
         raise HTTPException(400, "username and password required")
     await state.update(lambda s: (
@@ -153,6 +189,21 @@ async def apple_login(body: dict):
     except Exception as e:
         log.exception("pyicloud login failed")
         icloud_state = f"ERROR: {type(e).__name__}: {e}"
+
+    # Auto-submit 2FA if code provided
+    if code:
+        if icloud_state == "needs_2fa":
+            try:
+                icloud_state = await asyncio.get_event_loop().run_in_executor(
+                    None, coord.icloud.submit_2fa, code
+                )
+            except Exception as e:
+                icloud_state = f"ERROR: {type(e).__name__}: {e}"
+        if "REQUIRE_2FA" in findmy_state:
+            try:
+                findmy_state = str(await coord.apple.submit_2fa(code))
+            except Exception as e:
+                findmy_state = f"ERROR: {type(e).__name__}: {e}"
 
     # If iCloud login succeeded, dismiss any auth failure notification and restart loops
     if icloud_state == "logged_in":
@@ -305,7 +356,7 @@ async def extract_status():
 
 @app.post("/api/extract/start")
 async def extract_start(body: dict):
-    """Start key extraction. Requires apple_id."""
+    """Start key extraction. Auto-submits cached password if available."""
     apple_id = body.get("apple_id") or state.get().apple.username
     if not apple_id:
         raise HTTPException(400, "apple_id required")
@@ -314,18 +365,39 @@ async def extract_start(body: dict):
         raise HTTPException(503, "anisette server not available")
     ext = _extractor_mod.get()
     result = await ext.start_extraction(apple_id, mgr.url)
-    return {"phase": result.phase, "message": result.message}
+
+    # Auto-submit cached password so user skips straight to 2FA
+    if result.phase == "awaiting_password":
+        cached_pw = state.get().apple.password
+        if cached_pw:
+            result = await ext.submit_password(cached_pw)
+            # If password failed, clear the bad cache and ask user manually
+            if result.phase == "error":
+                await state.update(lambda s: setattr(s.apple, "password", ""))
+                result = await ext.start_extraction(apple_id, mgr.url)
+                result.message = "Cached password was rejected — enter your Apple ID password"
+
+    return {"phase": result.phase, "message": result.message, "bottles": result.bottles}
 
 
 @app.post("/api/extract/password")
 async def extract_password(body: dict):
-    """Submit password for extraction."""
+    """Submit password for extraction. Caches it for future use."""
     password = body.get("password") or ""
     if not password:
         raise HTTPException(400, "password required")
     ext = _extractor_mod.get()
     result = await ext.submit_password(password)
-    return {"phase": result.phase, "message": result.message}
+    if result.phase == "error":
+        # Wrong password — restart and re-prompt
+        apple_id = state.get().apple.username
+        mgr = anisette_manager.get()
+        result = await ext.start_extraction(apple_id, mgr.url)
+        result.message = "Wrong password — try again"
+    else:
+        # Cache the password since Apple ID password is shared across all flows
+        await state.update(lambda s: setattr(s.apple, "password", password))
+    return {"phase": result.phase, "message": result.message, "bottles": result.bottles}
 
 
 @app.post("/api/extract/2fa")
@@ -368,8 +440,7 @@ async def extract_passcode(body: dict):
         coord.apple.load_keys_dir()
         coord._reload_cloudkit_mapping()
         asyncio.create_task(coord._initial_data_fetch())
-        # Dismiss the repair alert now that keys are loaded
-        await supervisor.dismiss_repair("extraction_needed")
+        await supervisor.dismiss_notification("presencesync_extraction_needed")
     return {
         "phase": result.phase,
         "message": result.message,

@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+#!/usr/bin/with-contenv sh
 # ABOUTME: Entry point for PresenceSync HA add-on.
 # ABOUTME: Reads options.json, sets log level, launches uvicorn.
 set -e
