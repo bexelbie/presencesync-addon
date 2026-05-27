@@ -25,10 +25,9 @@ jobs:
           - arch: amd64
             platform: linux/amd64
             build_from: ghcr.io/home-assistant/amd64-base-debian:bookworm
-          # aarch64 disabled until amd64 build is stable
-          # - arch: aarch64
-          #   platform: linux/arm64
-          #   build_from: ghcr.io/home-assistant/aarch64-base-debian:bookworm
+          - arch: aarch64
+            platform: linux/arm64
+            build_from: ghcr.io/home-assistant/aarch64-base-debian:bookworm
 
     steps:
       - name: Checkout
