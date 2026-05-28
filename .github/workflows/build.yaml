@@ -1,3 +1,5 @@
+# ABOUTME: Builds and publishes PresenceSync add-on images for Home Assistant.
+# ABOUTME: Runs each target architecture on a native GitHub-hosted runner.
 name: Build PresenceSync Add-on
 
 on:
@@ -8,13 +10,19 @@ on:
       - ".github/workflows/build.yaml"
   workflow_dispatch:
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   REGISTRY: ghcr.io
   IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/presencesync
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
@@ -25,13 +33,15 @@ jobs:
           - arch: amd64
             platform: linux/amd64
             build_from: ghcr.io/home-assistant/amd64-base-debian:bookworm
+            runner: ubuntu-24.04
           - arch: aarch64
             platform: linux/arm64
             build_from: ghcr.io/home-assistant/aarch64-base-debian:bookworm
+            runner: ubuntu-24.04-arm
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Get version from config.yaml
         id: version
@@ -39,21 +49,18 @@ jobs:
           VERSION=$(grep '^version:' presencesync/config.yaml | sed 's/version: *"\(.*\)"/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: presencesync
           file: presencesync/Dockerfile
@@ -65,4 +72,5 @@ jobs:
           tags: |
             ${{ env.IMAGE_BASE }}-${{ matrix.arch }}:${{ steps.version.outputs.version }}
             ${{ env.IMAGE_BASE }}-${{ matrix.arch }}:latest
-          no-cache: true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
