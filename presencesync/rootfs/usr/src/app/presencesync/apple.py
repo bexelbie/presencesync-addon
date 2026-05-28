@@ -337,7 +337,15 @@ class AppleClient:
                     )
                     return acc, report
                 except (asyncio.TimeoutError, Exception) as e:
-                    log.warning("fetch %s failed: %s", getattr(acc, "name", "?"), e)
+                    err_msg = str(e)
+                    # Detect session expiry and update reported state
+                    if "Invalid login state" in err_msg:
+                        actual_state = getattr(self.account, "_login_state", None)
+                        if actual_state is not None and actual_state != self.last_login_state:
+                            log.warning("findmy session expired: %s → %s", self.last_login_state, actual_state)
+                            self.last_login_state = actual_state
+                    else:
+                        log.warning("fetch %s failed: %s", getattr(acc, "name", "?"), e)
                     return acc, None
 
         results = await asyncio.gather(*[_one(a) for a in self.accessories])

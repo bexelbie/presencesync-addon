@@ -12,7 +12,7 @@ hassio_api: true
 homeassistant_api: true
 auth_api: true
 services:
-  - mqtt:want
+  - mqtt:need
 host_network: false
 ingress: true
 ingress_port: 8099

@@ -23,6 +23,9 @@ log = logging.getLogger("presencesync")
 logging.basicConfig(level=os.environ.get("PRESENCESYNC_LOG_LEVEL", "info").upper(),
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
+# Suppress noisy uvicorn access logs for GET requests (status polling)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
 
 async def _auto_configure() -> None:
     """Fill in MQTT broker credentials from HA's Supervisor APIs or env vars."""
@@ -438,9 +441,17 @@ async def extract_passcode(body: dict):
         # Reload keys and trigger initial data cycle
         coord = get_coord()
         coord.apple.load_keys_dir()
+        real_count = len(coord.apple.accessories) + len(coord.apple.shared_accessories)
         coord._reload_cloudkit_mapping()
         asyncio.create_task(coord._initial_data_fetch())
         await supervisor.dismiss_notification("presencesync_extraction_needed")
+        # Reset extractor to idle so status doesn't persist stale "done"
+        ext._status = ext._status.__class__(phase="idle")
+        return {
+            "phase": "done",
+            "message": f"✓ Extracted {real_count} AirTag key(s). Tracking will begin shortly.",
+            "extracted_count": real_count,
+        }
     return {
         "phase": result.phase,
         "message": result.message,

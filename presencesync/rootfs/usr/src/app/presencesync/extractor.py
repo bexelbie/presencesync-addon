@@ -256,11 +256,9 @@ class Extractor:
     def _finalize(self):
         """Check results after process completes."""
         if self._process and self._process.returncode == 0:
-            plists = list(KEYS_DIR.glob("*.plist"))
             self._status = ExtractionStatus(
                 phase="done",
-                message=f"Extracted {len(plists)} accessory key(s)",
-                extracted_count=len(plists),
+                message="Loading extracted keys...",
             )
         else:
             # Detect passcode failure specifically

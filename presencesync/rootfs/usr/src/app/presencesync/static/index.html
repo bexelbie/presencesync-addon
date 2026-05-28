@@ -65,22 +65,39 @@ button.danger { background: var(--error); }
 .hidden { display: none; }
 .actions { display: flex; gap: 8px; }
 .actions button { flex: 1; }
-.signed-in { display: flex; align-items: center; gap: 8px; }
-.signed-in .email { font-weight: 500; flex: 1; }
-.steps { display: flex; gap: 4px; margin-bottom: 12px; }
-.step { flex: 1; height: 4px; border-radius: 2px; background: var(--border); }
-.step.done { background: var(--success); }
-.step.active { background: var(--primary); }
 .help-text { font-size: 0.85em; color: var(--muted); margin-bottom: 8px; }
 .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin .6s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.back-link { font-size: 0.85em; color: var(--muted); cursor: pointer; text-decoration: underline; margin-bottom: 8px; display: inline-block; }
+.back-link:hover { color: var(--text); }
 </style>
 </head>
 <body>
 <h1>🔵 PresenceSync</h1>
 
-<!-- Status Card -->
-<div class="card" id="status-card">
+<!-- ═══ VIEW: Login ═══ -->
+<div class="card hidden" id="view-login">
+  <h2>Sign In to Apple</h2>
+  <div id="login-msg"></div>
+  <input id="login-email" type="email" placeholder="Apple ID (email)">
+  <input id="login-password" type="password" placeholder="Password">
+  <button onclick="doLogin()">Sign In</button>
+</div>
+
+<!-- ═══ VIEW: 2FA ═══ -->
+<div class="card hidden" id="view-2fa">
+  <h2>Two-Factor Authentication</h2>
+  <div id="2fa-msg"></div>
+  <p class="help-text">Enter the 6-digit verification code from your trusted device.<br>
+  <strong>No notification?</strong> Generate a code manually:<br>
+  iPhone: <strong>Settings → [your name] → Sign-In & Security → Get Verification Code</strong></p>
+  <input id="2fa-code" type="text" placeholder="6-digit code" maxlength="6" pattern="[0-9]*" inputmode="numeric">
+  <button onclick="do2fa()">Verify</button>
+  <span class="back-link" onclick="backToLogin()">← Use different credentials</span>
+</div>
+
+<!-- ═══ VIEW: Dashboard ═══ -->
+<div class="card hidden" id="view-dashboard">
   <h2>Status</h2>
   <dl class="status-grid" id="status-grid">
     <dt>iDevices</dt><dd id="s-devices">—</dd>
@@ -100,79 +117,71 @@ button.danger { background: var(--error); }
     <button class="secondary" onclick="refreshNow()">Refresh iDevices</button>
     <button class="secondary" onclick="fetchItems()">Fetch AirTags</button>
   </div>
-</div>
-
-<!-- Apple Account Card -->
-<div class="card" id="login-card">
-  <h2>Apple Account</h2>
-  <div id="login-msg"></div>
-  <!-- Already signed in -->
-  <div id="login-signed-in" class="hidden">
-    <div class="signed-in">
-      <span class="email" id="signed-in-email"></span>
-      <button class="danger" style="width:auto;padding:6px 12px;font-size:0.85em" onclick="doReset()">Sign Out</button>
+  <div style="margin-top:12px; border-top:1px solid var(--border); padding-top:12px;">
+    <div style="display:flex; align-items:center; gap:8px;">
+      <span style="flex:1; font-size:0.9em;" id="dash-email"></span>
+      <button class="danger" style="width:auto;padding:6px 12px;font-size:0.85em" onclick="doSignOut()">Sign Out</button>
     </div>
   </div>
-  <!-- Login form -->
-  <div id="login-form">
-    <input id="apple-id" type="email" placeholder="Apple ID (email)">
-    <input id="apple-pw" type="password" placeholder="Password">
-    <p class="help-text">Enter the 6-digit verification code sent to your trusted device.<br>
-    <strong>No push notification?</strong> That's normal — generate a code manually:<br>
-    iPhone: <strong>Settings → [your name] → Sign-In & Security → Get Verification Code</strong><br>
-    <em>Tip: Put your phone in Airplane Mode, generate the code, turn Airplane Mode off, then submit.</em></p>
-    <input id="tfa-code" type="text" placeholder="6-digit 2FA code" maxlength="6" pattern="[0-9]*" inputmode="numeric">
-    <button onclick="doLogin()">Sign In</button>
-  </div>
 </div>
 
-<!-- AirTag Key Extraction Card (hidden until logged in) -->
-<div class="card hidden" id="extract-card">
+<!-- ═══ VIEW: Extract button (shown below dashboard when no keys) ═══ -->
+<div class="card hidden" id="view-extract-offer">
   <h2>AirTag Key Extraction</h2>
-  <div class="steps" id="extract-steps">
-    <div class="step" id="step-1"></div>
-    <div class="step" id="step-2"></div>
-    <div class="step" id="step-3"></div>
-    <div class="step" id="step-4"></div>
-    <div class="step" id="step-5"></div>
-  </div>
-  <div id="extract-msg"></div>
-  <!-- Idle state -->
-  <div id="extract-idle">
-    <p class="help-text">Extract AirTag private keys from iCloud Keychain. This authenticates as a separate device and joins the Keychain trust circle.</p>
-    <button onclick="startExtract()">Start Extraction</button>
-  </div>
-  <!-- Password (step 1) -->
-  <div id="extract-pw" class="hidden">
-    <p class="help-text">Step 1 of 5 — Authenticate to iCloud Keychain</p>
-    <input id="ext-password" type="password" placeholder="Apple ID password">
-    <button onclick="extPassword()">Submit Password</button>
-  </div>
-  <!-- 2FA (step 2) -->
-  <div id="extract-2fa" class="hidden">
-    <p class="help-text">Step 2 of 5 — A new 2FA code is needed (separate device session).<br>
-    <em>Tip: Airplane Mode → generate code → Airplane Mode off → submit.</em></p>
-    <input id="ext-2fa" type="text" placeholder="6-digit code" maxlength="6" inputmode="numeric">
-    <button onclick="ext2fa()">Submit Code</button>
-  </div>
-  <!-- Bottle selection (step 3) -->
-  <div id="extract-bottle" class="hidden">
-    <p class="help-text">Step 3 of 5 — Choose a device whose screen lock passcode you know. Device names may be inaccurate at this stage. Next you'll enter that device's passcode (the PIN/code you use to unlock the screen, not your Apple ID password).</p>
-    <select id="ext-bottle-select"></select>
-    <button onclick="extBottle()">Select Device</button>
-  </div>
-  <!-- Passcode (step 4) -->
-  <div id="extract-passcode" class="hidden">
-    <p class="help-text">Step 4 of 5 — Enter the screen lock passcode for <strong id="ext-passcode-device"></strong>.</p>
-    <input id="ext-passcode" type="text" placeholder="Device passcode" inputmode="numeric">
-    <button onclick="extPasscode()">Unlock</button>
-    <button onclick="extRestart()" class="btn-secondary">Try a different device</button>
-  </div>
+  <p class="help-text">Extract AirTag private keys from iCloud Keychain to enable tracking. This authenticates as a trusted device and retrieves encrypted keys.</p>
+  <button onclick="startExtract()">Extract AirTag Keys</button>
+</div>
+
+<!-- ═══ VIEW: Extraction — Password ═══ -->
+<div class="card hidden" id="view-ext-password">
+  <h2>AirTag Key Extraction</h2>
+  <div id="ext-pw-msg"></div>
+  <p class="help-text">Enter your Apple ID password to access iCloud Keychain.</p>
+  <input id="ext-password" type="password" placeholder="Apple ID password">
+  <button onclick="extSubmitPassword()">Continue</button>
+  <span class="back-link" onclick="extCancel()">← Cancel</span>
+</div>
+
+<!-- ═══ VIEW: Extraction — 2FA ═══ -->
+<div class="card hidden" id="view-ext-2fa">
+  <h2>AirTag Key Extraction</h2>
+  <div id="ext-2fa-msg"></div>
+  <p class="help-text">A separate 2FA code is required for keychain access.</p>
+  <input id="ext-2fa-code" type="text" placeholder="6-digit code" maxlength="6" pattern="[0-9]*" inputmode="numeric">
+  <button onclick="extSubmit2fa()">Verify</button>
+  <span class="back-link" onclick="extCancel()">← Cancel</span>
+</div>
+
+<!-- ═══ VIEW: Extraction — Select Device ═══ -->
+<div class="card hidden" id="view-ext-bottle">
+  <h2>AirTag Key Extraction</h2>
+  <div id="ext-bottle-msg"></div>
+  <p class="help-text">Select the device whose passcode you know. Labels may be inaccurate — Apple names don't always match your device.</p>
+  <select id="ext-bottle-select"></select>
+  <button onclick="extSubmitBottle()">Select Device</button>
+  <span class="back-link" onclick="extRestart()">← Start over</span>
+</div>
+
+<!-- ═══ VIEW: Extraction — Passcode ═══ -->
+<div class="card hidden" id="view-ext-passcode">
+  <h2>AirTag Key Extraction</h2>
+  <div id="ext-passcode-msg"></div>
+  <p class="help-text">Enter the screen lock passcode for <strong id="ext-passcode-device">the selected device</strong>. This is your numeric PIN or device password, not your Apple ID password.</p>
+  <input id="ext-passcode" type="password" placeholder="Device passcode">
+  <button onclick="extSubmitPasscode()">Unlock</button>
+  <span class="back-link" onclick="extRestart()">← Choose a different device</span>
+</div>
+
+<!-- ═══ VIEW: Starting up ═══ -->
+<div class="card" id="view-starting">
+  <h2>Starting</h2>
+  <p><span class="spinner"></span> PresenceSync is initializing...</p>
 </div>
 
 <script>
-const BASE = '';
-let currentStatus = null;
+const BASE = '.';
+
+// ─── Utilities ──────────────────────────────────────────────────────────────
 
 async function api(path, opts = {}) {
   const r = await fetch(BASE + path, {
@@ -186,15 +195,14 @@ function badge(text, type) {
   return `<span class="badge badge-${type}">${text}</span>`;
 }
 
-function msg(el, text, type = 'info') {
-  document.getElementById(el).innerHTML = text ? `<div class="msg msg-${type}">${text}</div>` : '';
+function msg(elId, text, type = 'info') {
+  document.getElementById(elId).innerHTML = text ? `<div class="msg msg-${type}">${text}</div>` : '';
 }
 
-function setStep(n) {
-  for (let i = 1; i <= 5; i++) {
-    const el = document.getElementById('step-' + i);
-    el.className = 'step' + (i < n ? ' done' : i === n ? ' active' : '');
-  }
+function showView(id) {
+  document.querySelectorAll('[id^="view-"]').forEach(el => el.classList.add('hidden'));
+  const el = document.getElementById(id);
+  if (el) el.classList.remove('hidden');
 }
 
 function timeAgo(unix) {
@@ -210,87 +218,128 @@ function fmtInterval(secs) {
   return `${secs / 60}m`;
 }
 
-async function refreshStatus() {
+// ─── State polling ──────────────────────────────────────────────────────────
+
+let _currentView = 'view-starting';
+let _extracting = false;
+
+async function refresh() {
   try {
     const s = await api('/api/status');
-    currentStatus = s;
-    document.getElementById('s-devices').textContent = `${s.idevices_tracked || 0} tracked`;
-    document.getElementById('s-airtags').textContent = `${s.airtags_tracked || 0} tracked`;
-    document.getElementById('s-mqtt').innerHTML = s.mqtt_connected ? badge('Connected','ok') : badge('Disconnected','err');
-    document.getElementById('s-icloud').innerHTML = s.icloud_login_state === 'logged_in' ? badge('OK','ok') : badge(s.icloud_login_state,'warn');
-    document.getElementById('s-findmy').innerHTML = s.findmy_login_state.includes('LOGGED_IN') ? badge('OK','ok') : badge(s.findmy_login_state,'warn');
-    document.getElementById('s-poll-interval').textContent = fmtInterval(s.poll_interval);
-    document.getElementById('s-refresh-interval').textContent = fmtInterval(s.refresh_interval);
-    document.getElementById('s-last-poll').textContent = timeAgo(s.last_poll_unix);
-    document.getElementById('s-last-refresh').textContent = timeAgo(s.last_refresh_unix);
-    document.getElementById('s-last-items').textContent = timeAgo(s.last_item_fetch_unix);
-
-    // Anisette: only show on failure
-    const anEl = document.getElementById('s-anisette');
-    if (!s.anisette_running) {
-      anEl.innerHTML = badge('Anisette stopped','err');
-      anEl.classList.remove('hidden');
-    } else {
-      anEl.classList.add('hidden');
-    }
-
-    // Show/hide login form based on auth state
     const loggedIn = s.findmy_login_state.includes('LOGGED_IN') && s.icloud_login_state === 'logged_in';
-    if (loggedIn) {
-      document.getElementById('login-form').classList.add('hidden');
-      document.getElementById('login-signed-in').classList.remove('hidden');
-      document.getElementById('signed-in-email').textContent = s.apple_username || '✓ Signed in';
-      document.getElementById('extract-card').classList.remove('hidden');
+
+    // If currently in an extraction flow, don't switch views — let extraction drive
+    if (_extracting) {
+      updateDashboardData(s);
+      return;
+    }
+
+    if (!loggedIn) {
+      // Determine: needs login or needs 2FA?
+      const needs2fa = s.findmy_login_state.includes('REQUIRE_2FA') || s.icloud_login_state === 'needs_2fa';
+      if (needs2fa) {
+        showView('view-2fa');
+      } else {
+        showView('view-login');
+      }
     } else {
-      document.getElementById('extract-card').classList.add('hidden');
-    }
+      // Logged in — show dashboard
+      showView('view-dashboard');
+      updateDashboardData(s);
 
-    // Poll extraction status if not idle
-    const ext = await api('/api/extract/status');
-    if (ext.phase && ext.phase !== 'idle') {
-      handleExtractPhase(ext);
+      // Show extraction offer if no AirTag keys and extractor is available
+      const hasKeys = s.airtags_tracked > 0;
+      const offerEl = document.getElementById('view-extract-offer');
+      if (!hasKeys && s.extractor_available) {
+        offerEl.classList.remove('hidden');
+      } else {
+        offerEl.classList.add('hidden');
+      }
     }
-  } catch(e) {}
-}
-
-async function doLogin() {
-  const id = document.getElementById('apple-id').value;
-  const pw = document.getElementById('apple-pw').value;
-  const code = document.getElementById('tfa-code').value;
-  if (!id || !pw) return msg('login-msg', 'Enter email and password', 'error');
-  msg('login-msg', '<span class="spinner"></span> Signing in...', 'info');
-  const r = await api('/api/apple/login', {method:'POST', body: JSON.stringify({username:id, password:pw, code: code || undefined})});
-  if (r.findmy_state?.includes('REQUIRE_2FA') || r.icloud_state === 'needs_2fa') {
-    msg('login-msg', '✓ Credentials accepted. Enter a 2FA code and click Sign In again.', 'info');
-    document.getElementById('tfa-code').focus();
-  } else if (r.findmy_state?.includes('LOGGED_IN') || r.icloud_state === 'logged_in') {
-    msg('login-msg', 'Signed in successfully!', 'success');
-    document.getElementById('login-form').classList.add('hidden');
-    document.getElementById('login-signed-in').classList.remove('hidden');
-    document.getElementById('signed-in-email').textContent = id;
-    refreshStatus();
-  } else {
-    msg('login-msg', `Login failed: ${r.error || 'unknown error'}`, 'error');
+  } catch(e) {
+    // Server not ready yet — show starting view
+    if (_currentView !== 'view-starting') showView('view-starting');
   }
 }
 
-async function doReset() {
+function updateDashboardData(s) {
+  document.getElementById('s-devices').textContent = `${s.idevices_tracked || 0} tracked`;
+  document.getElementById('s-airtags').textContent = `${s.airtags_tracked || 0} tracked`;
+  document.getElementById('s-mqtt').innerHTML = s.mqtt_connected ? badge('Connected','ok') : badge('Disconnected','err');
+  document.getElementById('s-icloud').innerHTML = s.icloud_login_state === 'logged_in' ? badge('OK','ok') : badge(s.icloud_login_state,'warn');
+  document.getElementById('s-findmy').innerHTML = s.findmy_login_state.includes('LOGGED_IN') ? badge('OK','ok') : badge(s.findmy_login_state,'warn');
+  document.getElementById('s-poll-interval').textContent = fmtInterval(s.poll_interval);
+  document.getElementById('s-refresh-interval').textContent = fmtInterval(s.refresh_interval);
+  document.getElementById('s-last-poll').textContent = timeAgo(s.last_poll_unix);
+  document.getElementById('s-last-refresh').textContent = timeAgo(s.last_refresh_unix);
+  document.getElementById('s-last-items').textContent = timeAgo(s.last_item_fetch_unix);
+  document.getElementById('dash-email').textContent = s.apple_username || '';
+
+  const anEl = document.getElementById('s-anisette');
+  if (!s.anisette_running) {
+    anEl.innerHTML = badge('Anisette stopped','err');
+    anEl.classList.remove('hidden');
+  } else {
+    anEl.classList.add('hidden');
+  }
+}
+
+// ─── Login ──────────────────────────────────────────────────────────────────
+
+async function doLogin() {
+  const id = document.getElementById('login-email').value;
+  const pw = document.getElementById('login-password').value;
+  if (!id || !pw) return msg('login-msg', 'Enter email and password', 'error');
+  msg('login-msg', '<span class="spinner"></span> Signing in...', 'info');
+  const r = await api('/api/apple/login', {method:'POST', body: JSON.stringify({username:id, password:pw})});
+  if (r.findmy_state?.includes('REQUIRE_2FA') || r.icloud_state === 'needs_2fa') {
+    showView('view-2fa');
+    msg('2fa-msg', '✓ Credentials accepted.', 'success');
+    document.getElementById('2fa-code').focus();
+  } else if (r.findmy_state?.includes('LOGGED_IN') || r.icloud_state === 'logged_in') {
+    msg('login-msg', '');
+    refresh();
+  } else {
+    msg('login-msg', `Sign in failed: ${r.findmy_state || r.icloud_state || 'unknown error'}`, 'error');
+  }
+}
+
+async function do2fa() {
+  const code = document.getElementById('2fa-code').value;
+  if (!code || code.length < 6) return msg('2fa-msg', 'Enter the 6-digit code', 'error');
+  msg('2fa-msg', '<span class="spinner"></span> Verifying...', 'info');
+  const r = await api('/api/apple/2fa/submit', {method:'POST', body: JSON.stringify({code})});
+  if (r.findmy_state?.includes('LOGGED_IN') || r.icloud_state === 'logged_in') {
+    msg('2fa-msg', '');
+    refresh();
+  } else {
+    msg('2fa-msg', 'Verification failed. Check the code and try again.', 'error');
+    document.getElementById('2fa-code').value = '';
+    document.getElementById('2fa-code').focus();
+  }
+}
+
+function backToLogin() {
+  showView('view-login');
+  msg('login-msg', '');
+}
+
+async function doSignOut() {
   if (!confirm('Sign out and clear Apple credentials?')) return;
   await api('/api/reset', {method:'POST'});
-  document.getElementById('login-signed-in').classList.add('hidden');
-  document.getElementById('login-form').classList.remove('hidden');
-  document.getElementById('apple-id').value = '';
-  document.getElementById('apple-pw').value = '';
-  document.getElementById('tfa-code').value = '';
+  showView('view-login');
+  document.getElementById('login-email').value = '';
+  document.getElementById('login-password').value = '';
   msg('login-msg', 'Signed out.', 'info');
-  refreshStatus();
 }
+
+// ─── Dashboard actions ──────────────────────────────────────────────────────
 
 async function pollNow() {
   const btn = event.target;
   btn.disabled = true; btn.textContent = 'Polling...';
   await api('/api/poll-now', {method:'POST'});
-  await refreshStatus();
+  await refresh();
   btn.disabled = false; btn.textContent = 'Poll iDevices';
 }
 
@@ -298,7 +347,7 @@ async function refreshNow() {
   const btn = event.target;
   btn.disabled = true; btn.textContent = 'Refreshing...';
   await api('/api/refresh-now', {method:'POST'});
-  await refreshStatus();
+  await refresh();
   btn.disabled = false; btn.textContent = 'Refresh iDevices';
 }
 
@@ -306,110 +355,113 @@ async function fetchItems() {
   const btn = event.target;
   btn.disabled = true; btn.textContent = 'Fetching...';
   await api('/api/fetch-items-now', {method:'POST'});
-  await refreshStatus();
+  await refresh();
   btn.disabled = false; btn.textContent = 'Fetch AirTags';
 }
 
-// --- Extraction ---
-const PHASE_STEP = {awaiting_password: 1, awaiting_2fa: 2, awaiting_bottle: 3, awaiting_passcode: 4, done: 5};
+// ─── Extraction flow ────────────────────────────────────────────────────────
+
+let _selectedBottleName = '';
 
 async function startExtract() {
-  const appleId = document.getElementById('apple-id').value || '';
-  msg('extract-msg', '<span class="spinner"></span> Starting extraction...', 'info');
-  setStep(1);
-  const r = await api('/api/extract/start', {method:'POST', body: JSON.stringify({apple_id: appleId})});
-  handleExtractPhase(r);
+  _extracting = true;
+  msg('ext-pw-msg', '<span class="spinner"></span> Starting extraction...', 'info');
+  showView('view-ext-password');
+  const r = await api('/api/extract/start', {method:'POST', body: JSON.stringify({})});
+  handleExtract(r);
 }
 
-function handleExtractPhase(r) {
-  ['extract-idle','extract-pw','extract-2fa','extract-bottle','extract-passcode'].forEach(
-    id => document.getElementById(id).classList.add('hidden'));
-
+function handleExtract(r) {
   if (r.error) {
-    msg('extract-msg', r.error, 'error');
-    setStep(0);
-    document.getElementById('extract-idle').classList.remove('hidden');
+    msg('ext-pw-msg', r.error, 'error');
     return;
   }
-
-  const step = PHASE_STEP[r.phase] || 0;
-  setStep(step);
-
   switch(r.phase) {
     case 'awaiting_password':
-      if (r.message && r.message.toLowerCase().includes('wrong') || r.message && r.message.toLowerCase().includes('rejected')) {
-        msg('extract-msg', r.message, 'error');
+      showView('view-ext-password');
+      if (r.message && (r.message.includes('wrong') || r.message.includes('rejected') || r.message.includes('Wrong') || r.message.includes('Rejected'))) {
+        msg('ext-pw-msg', r.message, 'error');
       } else {
-        msg('extract-msg', '', 'info');
+        msg('ext-pw-msg', '');
       }
-      const pw = document.getElementById('apple-pw').value;
-      if (pw) document.getElementById('ext-password').value = pw;
-      document.getElementById('extract-pw').classList.remove('hidden');
+      document.getElementById('ext-password').focus();
       break;
     case 'awaiting_2fa':
-      msg('extract-msg', '', 'info');
-      document.getElementById('extract-2fa').classList.remove('hidden');
+      showView('view-ext-2fa');
+      msg('ext-2fa-msg', '');
+      document.getElementById('ext-2fa-code').focus();
       break;
     case 'awaiting_bottle':
-      msg('extract-msg', '', 'info');
+      showView('view-ext-bottle');
+      msg('ext-bottle-msg', '✓ Authenticated with your Apple ID', 'success');
       const sel = document.getElementById('ext-bottle-select');
       sel.innerHTML = (r.bottles||[]).map(b => `<option value="${b.index}">${b.name}</option>`).join('');
-      document.getElementById('extract-bottle').classList.remove('hidden');
       break;
     case 'awaiting_passcode':
-      if (r.message && r.message.toLowerCase().includes('wrong')) {
-        msg('extract-msg', r.message, 'error');
-      } else {
-        msg('extract-msg', '', 'info');
-      }
-      document.getElementById('ext-passcode-device').textContent = window._selectedBottleName || 'the selected device';
+      showView('view-ext-passcode');
+      document.getElementById('ext-passcode-device').textContent = _selectedBottleName || 'the selected device';
       document.getElementById('ext-passcode').value = '';
-      document.getElementById('extract-passcode').classList.remove('hidden');
+      if (r.message && r.message.includes('Wrong')) {
+        msg('ext-passcode-msg', r.message, 'error');
+      } else {
+        msg('ext-passcode-msg', '');
+      }
+      document.getElementById('ext-passcode').focus();
       break;
     case 'done':
-      msg('extract-msg', `✓ Extracted ${r.extracted_count} key${r.extracted_count === 1 ? '' : 's'}! Tracking will begin within 60 seconds.`, 'success');
-      document.getElementById('extract-idle').classList.remove('hidden');
-      refreshStatus();
+      _extracting = false;
+      showView('view-dashboard');
+      document.getElementById('view-extract-offer').classList.add('hidden');
+      // Dashboard will refresh and show the updated AirTag count
+      refresh();
       break;
     default:
-      msg('extract-msg', r.message || 'Unknown state', 'warning');
-      document.getElementById('extract-idle').classList.remove('hidden');
+      msg('ext-pw-msg', r.message || 'Unexpected state', 'error');
   }
 }
 
-async function extPassword() {
+async function extSubmitPassword() {
   const pw = document.getElementById('ext-password').value;
   if (!pw) return;
-  msg('extract-msg', '<span class="spinner"></span> Authenticating...', 'info');
-  handleExtractPhase(await api('/api/extract/password', {method:'POST', body: JSON.stringify({password:pw})}));
-}
-async function ext2fa() {
-  const code = document.getElementById('ext-2fa').value;
-  if (!code) return;
-  msg('extract-msg', '<span class="spinner"></span> Verifying...', 'info');
-  handleExtractPhase(await api('/api/extract/2fa', {method:'POST', body: JSON.stringify({code})}));
-}
-async function extBottle() {
-  const sel = document.getElementById('ext-bottle-select');
-  const idx = sel.value;
-  window._selectedBottleName = sel.options[sel.selectedIndex].text;
-  msg('extract-msg', '<span class="spinner"></span> Selecting device...', 'info');
-  handleExtractPhase(await api('/api/extract/bottle', {method:'POST', body: JSON.stringify({index: parseInt(idx)})}));
-}
-async function extPasscode() {
-  const pc = document.getElementById('ext-passcode').value;
-  if (!pc) return;
-  msg('extract-msg', '<span class="spinner"></span> Unlocking escrow...', 'info');
-  handleExtractPhase(await api('/api/extract/passcode', {method:'POST', body: JSON.stringify({passcode:pc})}));
-}
-async function extRestart() {
-  msg('extract-msg', '<span class="spinner"></span> Restarting...', 'info');
-  handleExtractPhase(await api('/api/extract/start', {method:'POST', body: JSON.stringify({})}));
+  msg('ext-pw-msg', '<span class="spinner"></span> Authenticating...', 'info');
+  handleExtract(await api('/api/extract/password', {method:'POST', body: JSON.stringify({password:pw})}));
 }
 
-// Init
-refreshStatus();
-setInterval(refreshStatus, 30000);
+async function extSubmit2fa() {
+  const code = document.getElementById('ext-2fa-code').value;
+  if (!code) return;
+  msg('ext-2fa-msg', '<span class="spinner"></span> Verifying...', 'info');
+  handleExtract(await api('/api/extract/2fa', {method:'POST', body: JSON.stringify({code})}));
+}
+
+async function extSubmitBottle() {
+  const sel = document.getElementById('ext-bottle-select');
+  _selectedBottleName = sel.options[sel.selectedIndex].text;
+  msg('ext-bottle-msg', '<span class="spinner"></span> Selecting device...', 'info');
+  handleExtract(await api('/api/extract/bottle', {method:'POST', body: JSON.stringify({index: parseInt(sel.value)})}));
+}
+
+async function extSubmitPasscode() {
+  const pc = document.getElementById('ext-passcode').value;
+  if (!pc) return;
+  msg('ext-passcode-msg', '<span class="spinner"></span> Unlocking keychain...', 'info');
+  handleExtract(await api('/api/extract/passcode', {method:'POST', body: JSON.stringify({passcode:pc})}));
+}
+
+function extCancel() {
+  _extracting = false;
+  refresh();
+}
+
+async function extRestart() {
+  msg('ext-bottle-msg', '<span class="spinner"></span> Restarting...', 'info');
+  handleExtract(await api('/api/extract/start', {method:'POST', body: JSON.stringify({})}));
+}
+
+// ─── Init ───────────────────────────────────────────────────────────────────
+
+refresh();
+setInterval(refresh, 30000);
 </script>
 </body>
 </html>
