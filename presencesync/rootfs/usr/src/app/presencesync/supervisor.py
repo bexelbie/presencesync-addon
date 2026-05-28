@@ -3,7 +3,7 @@
 """Talk to HA's Supervisor + Core APIs to auto-discover sane defaults.
 
 Available inside any HA add-on that has `hassio_api: true` + `homeassistant_api: true`
-+ `services: - mqtt:want` in its config.yaml.
++ `services: - mqtt:need` in its config.yaml.
 """
 from __future__ import annotations
 

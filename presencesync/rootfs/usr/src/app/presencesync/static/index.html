@@ -78,6 +78,7 @@ button.danger { background: var(--error); }
 <!-- ═══ VIEW: Login ═══ -->
 <div class="card hidden" id="view-login">
   <h2>Sign In to Apple</h2>
+  <p class="help-text">Sign in with your Apple ID to connect your iPhones, iPads, Apple Watches, and AirTags to PresenceSync.</p>
   <div id="login-msg"></div>
   <input id="login-email" type="email" placeholder="Apple ID (email)">
   <input id="login-password" type="password" placeholder="Password">
@@ -125,46 +126,46 @@ button.danger { background: var(--error); }
   </div>
 </div>
 
-<!-- ═══ VIEW: Extract button (shown below dashboard when no keys) ═══ -->
+<!-- ═══ VIEW: AirTag setup (shown below dashboard when no keys) ═══ -->
 <div class="card hidden" id="view-extract-offer">
-  <h2>AirTag Key Extraction</h2>
-  <p class="help-text">Extract AirTag private keys from iCloud Keychain to enable tracking. This authenticates as a trusted device and retrieves encrypted keys.</p>
-  <button onclick="startExtract()">Extract AirTag Keys</button>
+  <h2>Connect AirTags</h2>
+  <p class="help-text">Sign in to Apple's AirTag system to track your AirTags and Find My items. This requires a separate login that accesses your iCloud Keychain.</p>
+  <button onclick="startExtract()">Set Up AirTags</button>
 </div>
 
-<!-- ═══ VIEW: Extraction — Password ═══ -->
+<!-- ═══ VIEW: AirTag login — Password ═══ -->
 <div class="card hidden" id="view-ext-password">
-  <h2>AirTag Key Extraction</h2>
+  <h2>Connect AirTags</h2>
   <div id="ext-pw-msg"></div>
-  <p class="help-text">Enter your Apple ID password to access iCloud Keychain.</p>
+  <p class="help-text">Enter your Apple ID password to access your AirTag data.</p>
   <input id="ext-password" type="password" placeholder="Apple ID password">
   <button onclick="extSubmitPassword()">Continue</button>
   <span class="back-link" onclick="extCancel()">← Cancel</span>
 </div>
 
-<!-- ═══ VIEW: Extraction — 2FA ═══ -->
+<!-- ═══ VIEW: AirTag login — 2FA ═══ -->
 <div class="card hidden" id="view-ext-2fa">
-  <h2>AirTag Key Extraction</h2>
+  <h2>Connect AirTags</h2>
   <div id="ext-2fa-msg"></div>
-  <p class="help-text">A separate 2FA code is required for keychain access.</p>
+  <p class="help-text">A separate verification code is required for AirTag access.</p>
   <input id="ext-2fa-code" type="text" placeholder="6-digit code" maxlength="6" pattern="[0-9]*" inputmode="numeric">
   <button onclick="extSubmit2fa()">Verify</button>
   <span class="back-link" onclick="extCancel()">← Cancel</span>
 </div>
 
-<!-- ═══ VIEW: Extraction — Select Device ═══ -->
+<!-- ═══ VIEW: AirTag login — Select Device ═══ -->
 <div class="card hidden" id="view-ext-bottle">
-  <h2>AirTag Key Extraction</h2>
+  <h2>Connect AirTags</h2>
   <div id="ext-bottle-msg"></div>
-  <p class="help-text">Select the device whose passcode you know. Labels may be inaccurate — Apple names don't always match your device.</p>
+  <p class="help-text">Select the device whose passcode you know. Labels may not exactly match your device names.</p>
   <select id="ext-bottle-select"></select>
   <button onclick="extSubmitBottle()">Select Device</button>
   <span class="back-link" onclick="extRestart()">← Start over</span>
 </div>
 
-<!-- ═══ VIEW: Extraction — Passcode ═══ -->
+<!-- ═══ VIEW: AirTag login — Passcode ═══ -->
 <div class="card hidden" id="view-ext-passcode">
-  <h2>AirTag Key Extraction</h2>
+  <h2>Connect AirTags</h2>
   <div id="ext-passcode-msg"></div>
   <p class="help-text">Enter the screen lock passcode for <strong id="ext-passcode-device">the selected device</strong>. This is your numeric PIN or device password, not your Apple ID password.</p>
   <input id="ext-passcode" type="password" placeholder="Device passcode">
@@ -172,10 +173,10 @@ button.danger { background: var(--error); }
   <span class="back-link" onclick="extRestart()">← Choose a different device</span>
 </div>
 
-<!-- ═══ VIEW: Starting up ═══ -->
+<!-- ═══ VIEW: Starting up (anisette not ready) ═══ -->
 <div class="card" id="view-starting">
-  <h2>Starting</h2>
-  <p><span class="spinner"></span> PresenceSync is initializing...</p>
+  <h2>Preparing</h2>
+  <p><span class="spinner"></span> <span id="starting-msg">PresenceSync is getting ready. This usually takes about 45 seconds on most systems.</span></p>
 </div>
 
 <script>
@@ -222,10 +223,40 @@ function fmtInterval(secs) {
 
 let _currentView = 'view-starting';
 let _extracting = false;
+let _startingAt = Date.now();
 
 async function refresh() {
   try {
     const s = await api('/api/status');
+
+    // Gate: if anisette isn't healthy, show preparing or warning
+    if (!s.anisette_healthy) {
+      if (_startingAt) {
+        // Still in initial startup
+        const elapsed = (Date.now() - _startingAt) / 1000;
+        const msgEl = document.getElementById('starting-msg');
+        if (elapsed > 90) {
+          msgEl.textContent = 'Something went wrong — the authentication service failed to start. Check the add-on logs.';
+          return;
+        } else if (elapsed > 45) {
+          msgEl.textContent = 'Taking longer than expected. Still waiting for the authentication service...';
+        }
+        showView('view-starting');
+      } else {
+        // Was healthy before, now regressed — show on dashboard if visible
+        const anEl = document.getElementById('s-anisette');
+        anEl.innerHTML = '<span class="badge badge-err">Authentication service offline</span>';
+        anEl.classList.remove('hidden');
+      }
+      return;
+    }
+
+    // Once past preparing, slow down polling
+    if (_startingAt) {
+      _startingAt = null;
+      _slowPoll();
+    }
+
     const loggedIn = s.findmy_login_state.includes('LOGGED_IN') && s.icloud_login_state === 'logged_in';
 
     // If currently in an extraction flow, don't switch views — let extraction drive
@@ -247,7 +278,7 @@ async function refresh() {
       showView('view-dashboard');
       updateDashboardData(s);
 
-      // Show extraction offer if no AirTag keys and extractor is available
+      // Show AirTag setup offer if no AirTag keys and extractor is available
       const hasKeys = s.airtags_tracked > 0;
       const offerEl = document.getElementById('view-extract-offer');
       if (!hasKeys && s.extractor_available) {
@@ -291,16 +322,22 @@ async function doLogin() {
   const pw = document.getElementById('login-password').value;
   if (!id || !pw) return msg('login-msg', 'Enter email and password', 'error');
   msg('login-msg', '<span class="spinner"></span> Signing in...', 'info');
-  const r = await api('/api/apple/login', {method:'POST', body: JSON.stringify({username:id, password:pw})});
-  if (r.findmy_state?.includes('REQUIRE_2FA') || r.icloud_state === 'needs_2fa') {
-    showView('view-2fa');
-    msg('2fa-msg', '✓ Credentials accepted.', 'success');
-    document.getElementById('2fa-code').focus();
-  } else if (r.findmy_state?.includes('LOGGED_IN') || r.icloud_state === 'logged_in') {
-    msg('login-msg', '');
-    refresh();
-  } else {
-    msg('login-msg', `Sign in failed: ${r.findmy_state || r.icloud_state || 'unknown error'}`, 'error');
+  try {
+    const r = await api('/api/apple/login', {method:'POST', body: JSON.stringify({username:id, password:pw})});
+    if (r.detail) {
+      msg('login-msg', r.detail, 'error');
+    } else if (r.findmy_state?.includes('REQUIRE_2FA') || r.icloud_state === 'needs_2fa') {
+      showView('view-2fa');
+      msg('2fa-msg', '✓ Credentials accepted.', 'success');
+      document.getElementById('2fa-code').focus();
+    } else if (r.findmy_state?.includes('LOGGED_IN') || r.icloud_state === 'logged_in') {
+      msg('login-msg', '');
+      refresh();
+    } else {
+      msg('login-msg', `Sign in failed: ${r.findmy_state || r.icloud_state || 'unknown error'}`, 'error');
+    }
+  } catch(e) {
+    msg('login-msg', 'Connection error — please try again', 'error');
   }
 }
 
@@ -309,11 +346,13 @@ async function do2fa() {
   if (!code || code.length < 6) return msg('2fa-msg', 'Enter the 6-digit code', 'error');
   msg('2fa-msg', '<span class="spinner"></span> Verifying...', 'info');
   const r = await api('/api/apple/2fa/submit', {method:'POST', body: JSON.stringify({code})});
-  if (r.findmy_state?.includes('LOGGED_IN') || r.icloud_state === 'logged_in') {
+  const findmyOk = r.findmy_state?.includes('LOGGED_IN');
+  const icloudOk = r.icloud_state === 'logged_in';
+  if (findmyOk && icloudOk) {
     msg('2fa-msg', '');
     refresh();
   } else {
-    msg('2fa-msg', 'Verification failed. Check the code and try again.', 'error');
+    msg('2fa-msg', 'Code not accepted. Generate a new code on your trusted device and try again.', 'error');
     document.getElementById('2fa-code').value = '';
     document.getElementById('2fa-code').focus();
   }
@@ -365,10 +404,20 @@ let _selectedBottleName = '';
 
 async function startExtract() {
   _extracting = true;
-  msg('ext-pw-msg', '<span class="spinner"></span> Starting extraction...', 'info');
+  msg('ext-pw-msg', '<span class="spinner"></span> Connecting to AirTag service...', 'info');
   showView('view-ext-password');
-  const r = await api('/api/extract/start', {method:'POST', body: JSON.stringify({})});
-  handleExtract(r);
+  try {
+    const r = await api('/api/extract/start', {method:'POST', body: JSON.stringify({})});
+    if (r.detail) {
+      msg('ext-pw-msg', r.detail, 'error');
+      _extracting = false;
+    } else {
+      handleExtract(r);
+    }
+  } catch(e) {
+    msg('ext-pw-msg', 'Connection error — please try again', 'error');
+    _extracting = false;
+  }
 }
 
 function handleExtract(r) {
@@ -393,7 +442,7 @@ function handleExtract(r) {
       break;
     case 'awaiting_bottle':
       showView('view-ext-bottle');
-      msg('ext-bottle-msg', '✓ Authenticated with your Apple ID', 'success');
+      msg('ext-bottle-msg', '✓ Signed in to AirTag service', 'success');
       const sel = document.getElementById('ext-bottle-select');
       sel.innerHTML = (r.bottles||[]).map(b => `<option value="${b.index}">${b.name}</option>`).join('');
       break;
@@ -423,7 +472,7 @@ function handleExtract(r) {
 async function extSubmitPassword() {
   const pw = document.getElementById('ext-password').value;
   if (!pw) return;
-  msg('ext-pw-msg', '<span class="spinner"></span> Authenticating...', 'info');
+  msg('ext-pw-msg', '<span class="spinner"></span> Signing in to AirTag service...', 'info');
   handleExtract(await api('/api/extract/password', {method:'POST', body: JSON.stringify({password:pw})}));
 }
 
@@ -461,7 +510,12 @@ async function extRestart() {
 // ─── Init ───────────────────────────────────────────────────────────────────
 
 refresh();
-setInterval(refresh, 30000);
+// Poll faster during startup (every 5s), slow down once past preparing screen
+let _refreshInterval = setInterval(refresh, 5000);
+function _slowPoll() {
+  clearInterval(_refreshInterval);
+  _refreshInterval = setInterval(refresh, 30000);
+}
 </script>
 </body>
 </html>

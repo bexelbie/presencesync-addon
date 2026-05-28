@@ -43,6 +43,7 @@ class Extractor:
         self._process: asyncio.subprocess.Process | None = None
         self._status = ExtractionStatus()
         self._output_lines: list[str] = []
+        self._output_buffer: str = ""
         self._reader_task: asyncio.Task | None = None
         self._last_bottle_index: int | None = None
         self._last_apple_id: str = ""
@@ -56,12 +57,28 @@ class Extractor:
     def available(self) -> bool:
         return EXPORT_BINARY.exists()
 
+    async def _cleanup_process(self) -> None:
+        """Kill subprocess if still running, drain reader, then finalize."""
+        if self._process and self._process.returncode is None:
+            try:
+                self._process.kill()
+                await self._process.wait()
+            except ProcessLookupError:
+                pass
+        # Drain any remaining output from the reader task
+        if self._reader_task and not self._reader_task.done():
+            try:
+                await asyncio.wait_for(self._reader_task, timeout=2)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                self._reader_task.cancel()
+        self._finalize()
+
     async def start_extraction(
         self,
         apple_id: str,
         server_url: str,
     ) -> ExtractionStatus:
-        """Start the export-findmy process. Prompts for password next."""
+        """Start the export-findmy process. Waits for the password prompt before returning."""
         if self._process is not None and self._process.returncode is None:
             return ExtractionStatus(phase="error", error="extraction already in progress")
 
@@ -83,6 +100,7 @@ class Extractor:
         env = os.environ.copy()
 
         self._output_lines = []
+        self._output_buffer = ""
         self._status = ExtractionStatus(phase="started", message="Starting key extraction...")
 
         try:
@@ -92,14 +110,29 @@ class Extractor:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=env,
-                cwd=str(state.DATA_DIR),  # binary reads/writes device_identity.json from cwd
+                cwd=str(state.DATA_DIR),
             )
         except Exception as e:
             self._status = ExtractionStatus(phase="error", error=str(e))
             return self._status
 
-        # Start reading output
+        # Start chunk-based output reader
         self._reader_task = asyncio.create_task(self._read_output())
+
+        # Wait for the binary to print "Password:" before declaring ready
+        ready = await self._wait_for_pattern(
+            r"[Pp]assword:", timeout=15,
+            waiting_msg="Waiting for extraction process to start..."
+        )
+        if not ready:
+            await self._cleanup_process()
+            if self._status.phase != "error":
+                self._status.phase = "error"
+                self._status.error = "Binary did not prompt for password"
+                log.warning("export-findmy did not prompt for password within timeout. Output: %s",
+                            self._output_buffer[:500])
+            return self._status
+
         self._status.phase = "awaiting_password"
         self._status.message = "Enter your Apple ID password"
         return self._status
@@ -111,8 +144,32 @@ class Extractor:
         assert self._process.stdin is not None
         self._process.stdin.write((password + "\n").encode())
         await self._process.stdin.drain()
-        # Wait for output — binary may skip 2FA if session is cached
-        await self._wait_for_next_prompt(timeout=10)
+
+        # Wait for 2FA prompt, bottle list, or process exit (auth failure)
+        # Binary does: [1/7] connect anisette → [2/7] login → "2FA code:" or bottles
+        found = await self._wait_for_pattern(
+            r"2[Ff][Aa] code:|verification code|\[\d+\]",
+            timeout=45,
+            extended_timeout=45,
+            waiting_msg="Logging in to Apple..."
+        )
+        if not found:
+            await self._cleanup_process()
+            if self._status.phase != "error":
+                self._status.phase = "error"
+                self._status.error = "Login timed out"
+                log.warning("export-findmy password submission timed out. Output: %s",
+                            self._output_buffer[:1000])
+        else:
+            # Determine what we matched
+            if self._detect_2fa_prompt():
+                pass  # phase set by _detect_2fa_prompt
+            else:
+                self._parse_bottles()
+                if self._status.phase != "awaiting_bottle":
+                    # Process may have exited during parse
+                    if self._process and self._process.returncode is not None:
+                        self._finalize()
         return self._status
 
     async def submit_2fa(self, code: str) -> ExtractionStatus:
@@ -122,30 +179,73 @@ class Extractor:
         assert self._process.stdin is not None
         self._process.stdin.write((code + "\n").encode())
         await self._process.stdin.drain()
-        # Wait for bottle list or completion
-        await self._wait_for_next_prompt(timeout=15)
+        # Wait for bottle list or process exit
+        found = await self._wait_for_pattern(
+            r"\[\d+\]",
+            timeout=30,
+            waiting_msg="Verifying 2FA code..."
+        )
+        if not found:
+            await self._cleanup_process()
+            if self._status.phase != "error":
+                self._status.phase = "error"
+                self._status.error = "2FA verification timed out"
+        else:
+            self._parse_bottles()
         return self._status
 
-    async def _wait_for_next_prompt(self, timeout: float = 10):
-        """Poll output to detect what the binary is waiting for next."""
-        deadline = asyncio.get_event_loop().time() + timeout
-        prev_lines = len(self._output_lines)
-        self._status.phase = "running"
-        self._status.message = "Processing..."
-        while asyncio.get_event_loop().time() < deadline:
-            await asyncio.sleep(0.5)
+    async def _wait_for_pattern(
+        self,
+        pattern: str,
+        timeout: float = 30,
+        extended_timeout: float = 0,
+        waiting_msg: str = "Processing..."
+    ) -> bool:
+        """Wait for output matching pattern, process exit, or timeout.
+        
+        Returns True if pattern was found. Sets status on timeout/exit.
+        Uses status-based polling with timeout as escape valve.
+        If extended_timeout > 0, logs a warning at first timeout and waits longer.
+        """
+        import time
+        regex = re.compile(pattern)
+        start = time.monotonic()
+        first_deadline = start + timeout
+        final_deadline = start + timeout + extended_timeout
+        warned = False
+
+        self._status.message = waiting_msg
+
+        while time.monotonic() < final_deadline:
+            await asyncio.sleep(0.3)
+
+            # Check for pattern in full buffer (catches prompts without newlines)
+            if regex.search(self._output_buffer):
+                log.debug("Pattern %r matched after %.1fs", pattern, time.monotonic() - start)
+                return True
+
             # Check if process exited
             if self._process and self._process.returncode is not None:
-                self._finalize()
-                return
-            # Check for new output indicating a prompt
-            if len(self._output_lines) > prev_lines:
-                prev_lines = len(self._output_lines)
-                if self._detect_2fa_prompt():
-                    return
-                self._parse_bottles()
-                if self._status.phase == "awaiting_bottle":
-                    return
+                log.debug("Process exited (rc=%d) while waiting for pattern %r",
+                          self._process.returncode, pattern)
+                return False
+
+            # Warn at first deadline if extended timeout is active
+            if not warned and extended_timeout > 0 and time.monotonic() >= first_deadline:
+                warned = True
+                log.warning("Still waiting for pattern %r after %.0fs (extended wait active). "
+                            "Output so far: %s", pattern, timeout, self._output_buffer[:300])
+                self._status.message = "Taking longer than expected..."
+
+            # Periodic debug logging
+            elapsed = time.monotonic() - start
+            if int(elapsed) % 10 == 0 and int(elapsed) > 0:
+                log.debug("Waiting for pattern %r (%.0fs elapsed, %d bytes buffered)",
+                          pattern, elapsed, len(self._output_buffer))
+
+        log.warning("Timed out waiting for pattern %r after %.0fs. Buffer: %s",
+                    pattern, time.monotonic() - start, self._output_buffer[:500])
+        return False
 
     async def submit_bottle_choice(self, index: int) -> ExtractionStatus:
         """Select which escrow bottle to use."""
@@ -155,8 +255,20 @@ class Extractor:
         self._last_bottle_index = index
         self._process.stdin.write((str(index) + "\n").encode())
         await self._process.stdin.drain()
-        self._status.phase = "awaiting_passcode"
-        self._status.message = "Enter the device screen lock passcode for the selected bottle"
+        # Wait for passcode prompt ("Enter the passcode of that device:")
+        found = await self._wait_for_pattern(
+            r"[Pp]asscode",
+            timeout=10,
+            waiting_msg="Selecting device..."
+        )
+        if found:
+            self._status.phase = "awaiting_passcode"
+            self._status.message = "Enter the screen lock passcode for the selected device"
+        else:
+            await self._cleanup_process()
+            if self._status.phase != "error":
+                self._status.phase = "error"
+                self._status.error = "Did not receive passcode prompt"
         return self._status
 
     async def submit_passcode(self, passcode: str) -> ExtractionStatus:
@@ -174,6 +286,12 @@ class Extractor:
             await asyncio.wait_for(self._process.wait(), timeout=120)
         except asyncio.TimeoutError:
             pass
+        # Drain reader before inspecting output
+        if self._reader_task and not self._reader_task.done():
+            try:
+                await asyncio.wait_for(self._reader_task, timeout=2)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
         self._finalize()
         return self._status
 
@@ -220,26 +338,30 @@ class Extractor:
                 await asyncio.wait_for(self._process.wait(), timeout=120)
             except asyncio.TimeoutError:
                 pass
+            if self._reader_task and not self._reader_task.done():
+                try:
+                    await asyncio.wait_for(self._reader_task, timeout=2)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
             self._finalize()
 
         return self._status
 
     def _detect_2fa_prompt(self) -> bool:
-        """Check if binary is asking for a 2FA code."""
-        for line in self._output_lines:
-            lower = line.lower()
-            if "2fa" in lower or "verification code" in lower or "two-factor" in lower:
-                self._status.phase = "awaiting_2fa"
-                self._status.message = "Enter your 2FA code"
-                return True
+        """Check if binary is asking for a 2FA code (searches raw buffer for no-newline prompts)."""
+        lower = self._output_buffer.lower()
+        if "2fa code:" in lower or "verification code" in lower or "two-factor" in lower:
+            self._status.phase = "awaiting_2fa"
+            self._status.message = "Enter your 2FA code"
+            return True
         return False
 
     def _parse_bottles(self):
-        """Parse bottle list from output."""
+        """Parse bottle list from output buffer."""
         bottles = []
         # Binary outputs: [N] SERIAL (Device Name)
         bottle_re = re.compile(r"\[(\d+)\]\s+(\S+)\s+\((.+)\)")
-        for line in self._output_lines:
+        for line in self._output_buffer.splitlines():
             m = bottle_re.match(line.strip())
             if m:
                 idx, serial, name = int(m.group(1)), m.group(2), m.group(3)
@@ -261,25 +383,33 @@ class Extractor:
                 message="Loading extracted keys...",
             )
         else:
-            # Detect passcode failure specifically
-            output_tail = "\n".join(self._output_lines[-20:]) if self._output_lines else ""
-            if "Authentication failed" in output_tail or "EscrowError" in output_tail:
+            # Check buffer for known error patterns
+            tail = self._output_buffer[-2000:] if self._output_buffer else ""
+            if "Authentication failed" in tail or "EscrowError" in tail:
                 self._status = ExtractionStatus(
                     phase="awaiting_passcode",
                     message="Wrong passcode — try again",
                 )
             else:
-                self._status = ExtractionStatus(phase="error", error=output_tail or "unknown error")
+                self._status = ExtractionStatus(phase="error", error=tail[-500:] or "unknown error")
 
     async def _read_output(self):
-        """Read subprocess output line by line."""
+        """Read subprocess output as chunks (not lines) to catch prompts without newlines."""
         if self._process is None or self._process.stdout is None:
             return
         try:
-            async for line in self._process.stdout:
-                text = line.decode(errors="replace").rstrip()
-                self._output_lines.append(text)
-                log.debug("[export-findmy] %s", text)
+            while True:
+                chunk = await self._process.stdout.read(4096)
+                if not chunk:
+                    break
+                text = chunk.decode(errors="replace")
+                self._output_buffer += text
+                # Also maintain line list for structured parsing
+                for line in text.splitlines():
+                    stripped = line.strip()
+                    if stripped:
+                        self._output_lines.append(stripped)
+                        log.debug("[export-findmy] %s", stripped)
         except Exception:
             pass
 

@@ -121,6 +121,7 @@ async def status():
         "refresh_interval": int(state.get_addon_config().refresh_interval),
         "item_poll_interval": int(state.get_addon_config().item_poll_interval),
         "anisette_running": mgr.running,
+        "anisette_healthy": await mgr.health_check() if mgr.running else False,
         "extractor_available": _extractor_mod.get().available,
         "apple_username": state.get().apple.username or "",
     }
@@ -165,6 +166,12 @@ async def apple_login(body: dict):
     code = body.get("code") or ""
     if not username or not password:
         raise HTTPException(400, "username and password required")
+
+    # Gate on anisette — findmy.py needs it for authentication
+    mgr = anisette_manager.get()
+    if not await mgr.ensure_running():
+        raise HTTPException(503, "Authentication service is not ready. Please wait and try again.")
+
     await state.update(lambda s: (
         setattr(s.apple, "username", username),
         setattr(s.apple, "password", password),
