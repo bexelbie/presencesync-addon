@@ -121,8 +121,9 @@ class Extractor:
 
         # Wait for the binary to print "Password:" before declaring ready
         ready = await self._wait_for_pattern(
-            r"[Pp]assword:", timeout=15,
-            waiting_msg="Waiting for extraction process to start..."
+            r"[Pp]assword:", timeout=45,
+            extended_timeout=45,
+            waiting_msg="Waiting for AirTag service to start..."
         )
         if not ready:
             await self._cleanup_process()
@@ -182,7 +183,8 @@ class Extractor:
         # Wait for bottle list or process exit
         found = await self._wait_for_pattern(
             r"\[\d+\]",
-            timeout=30,
+            timeout=45,
+            extended_timeout=45,
             waiting_msg="Verifying 2FA code..."
         )
         if not found:
@@ -258,7 +260,8 @@ class Extractor:
         # Wait for passcode prompt ("Enter the passcode of that device:")
         found = await self._wait_for_pattern(
             r"[Pp]asscode",
-            timeout=10,
+            timeout=45,
+            extended_timeout=45,
             waiting_msg="Selecting device..."
         )
         if found:
