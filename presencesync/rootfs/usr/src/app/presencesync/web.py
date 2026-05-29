@@ -374,18 +374,24 @@ async def extract_start(body: dict):
     if not await mgr.ensure_running():
         raise HTTPException(503, "anisette server not available")
     ext = _extractor_mod.get()
+    log.info("Starting AirTag extraction for %s", apple_id)
     result = await ext.start_extraction(apple_id, mgr.url)
+    log.debug("start_extraction returned phase=%s", result.phase)
 
     # Auto-submit cached password so user skips straight to 2FA
     if result.phase == "awaiting_password":
         cached_pw = state.get().apple.password
         if cached_pw:
+            log.debug("Auto-submitting cached password")
             result = await ext.submit_password(cached_pw)
-            # If password failed, clear the bad cache and ask user manually
+            log.debug("Auto-submit result: phase=%s error=%s", result.phase, result.error)
             if result.phase == "error":
+                log.warning("Auto-submit cached password failed: %s", result.error)
                 await state.update(lambda s: setattr(s.apple, "password", ""))
                 result = await ext.start_extraction(apple_id, mgr.url)
-                result.message = "Cached password was rejected — enter your Apple ID password"
+                result.message = f"AirTag login failed — enter your Apple ID password. (Detail: {result.message or 'unknown'})"
+        else:
+            log.debug("No cached password, prompting user")
 
     return {"phase": result.phase, "message": result.message, "bottles": result.bottles}
 
@@ -397,14 +403,18 @@ async def extract_password(body: dict):
     if not password:
         raise HTTPException(400, "password required")
     ext = _extractor_mod.get()
+    log.debug("Manual password submission for extraction")
     result = await ext.submit_password(password)
+    log.debug("Manual submit result: phase=%s error=%s", result.phase, result.error)
     if result.phase == "error":
-        # Wrong password — restart and re-prompt
+        log.warning("Manual password submission failed: %s", result.error)
         apple_id = state.get().apple.username
         mgr = anisette_manager.get()
+        error_detail = result.error or "unknown"
         result = await ext.start_extraction(apple_id, mgr.url)
-        result.message = "Wrong password — try again"
+        result.message = f"AirTag login failed — try again. (Detail: {error_detail})"
     else:
+        log.info("Extraction password accepted, phase=%s", result.phase)
         # Cache the password since Apple ID password is shared across all flows
         await state.update(lambda s: setattr(s.apple, "password", password))
     return {"phase": result.phase, "message": result.message, "bottles": result.bottles}

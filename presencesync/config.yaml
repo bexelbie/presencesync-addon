@@ -1,7 +1,7 @@
 name: PresenceSync
 version: "0.6.0"
 slug: presencesync
-description: Track Apple AirTags (owned + shared), iPhones, iPads, Macs, and Apple Watches in Home Assistant via Find My.
+description: Track the iDevices (iPhones, iPads, Macs, Apple Watches, etc.) and AirTags you own or that have been shared to you in Home Assistant.
 image: ghcr.io/bexelbie/presencesync-{arch}
 arch:
   - amd64

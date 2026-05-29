@@ -428,7 +428,7 @@ function handleExtract(r) {
   switch(r.phase) {
     case 'awaiting_password':
       showView('view-ext-password');
-      if (r.message && (r.message.includes('wrong') || r.message.includes('rejected') || r.message.includes('Wrong') || r.message.includes('Rejected'))) {
+      if (r.message && r.message.includes('failed')) {
         msg('ext-pw-msg', r.message, 'error');
       } else {
         msg('ext-pw-msg', '');
